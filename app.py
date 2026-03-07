@@ -1,8 +1,28 @@
 "LLM App with Web Reasearch Tool"
 
 import asyncio
+from urllib.parse import urlparse
+from urllib.robotparser import RobotFileParser
+
 import streamlit as st
+
+
 from duckduckgo_search import DDGS
+
+def check_robots_txt(urls: list[str]) -> list[str]:
+    allowed_urls=[]
+    for url in urls:
+        try:
+            robots_url=f"{urlparse(url).scheme}//{urlparse(url).netloc}/robots.txt"
+            rp=RobotFileParser(robots_url)
+            rp.read()
+
+            if rp.can_fetch("*",url):
+                allowed_urls.append(url)
+        except Exception:
+            #If robots.txt is missing or there is any error assume url is allowed
+            allowed_urls.append(url)
+    return allowed_urls
 
 def get_web_urls(search_term: str, numresults: int =10,)-> list[str]:
     try:
@@ -10,17 +30,19 @@ def get_web_urls(search_term: str, numresults: int =10,)-> list[str]:
         for url in discard_url:
             search_term += f"-site{url}"
         
-        st.write(search_term)
+        #st.write(search_term)
 
         results=DDGS().text(search_term,max_results=numresults)
-        st.write(results)
-        return results
+        #st.write(results)
+        return check_robots_txt(results)
     
     except Exception as e:
         error_msg=("Failed to fetch the result from the web ",str(e))
         print(error_msg)
         st.write(error_msg)
         st.stop()
+
+
 async def run():
     #Title of the page
     st.set_page_config(page_title="LLM with Web Search")

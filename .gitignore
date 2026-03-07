@@ -1,0 +1,76 @@
+# -------------------------
+# Python cache
+# -------------------------
+__pycache__/
+*.py[cod]
+*$py.class
+
+# -------------------------
+# Virtual environments
+# -------------------------
+venv/
+env/
+ENV/
+.venv/
+
+# -------------------------
+# Environment variables
+# -------------------------
+.env
+.env.*
+*.env
+
+# -------------------------
+# Streamlit
+# -------------------------
+.streamlit/secrets.toml
+
+# -------------------------
+# Playwright
+# -------------------------
+playwright/.cache/
+ms-playwright/
+playwright-report/
+test-results/
+
+# -------------------------
+# ChromaDB (local vector DB)
+# -------------------------
+chroma/
+chromadb/
+*.sqlite3
+
+# -------------------------
+# Logs
+# -------------------------
+*.log
+
+# -------------------------
+# Build / Distribution
+# -------------------------
+build/
+dist/
+*.egg-info/
+
+# -------------------------
+# Jupyter notebooks
+# -------------------------
+.ipynb_checkpoints/
+
+# -------------------------
+# OS files
+# -------------------------
+.DS_Store
+Thumbs.db
+
+# -------------------------
+# IDE / Editor
+# -------------------------
+.vscode/
+.idea/
+
+# -------------------------
+# Temporary files
+# -------------------------
+*.tmp
+*.temp

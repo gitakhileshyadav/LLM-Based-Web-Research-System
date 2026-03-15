@@ -1,3 +1,4 @@
+
 "LLM App with Web Reasearch Tool"
 
 import asyncio
@@ -8,6 +9,32 @@ import streamlit as st
 
 
 from duckduckgo_search import DDGS
+
+from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
+from crawl4ai.content_filter_strategy import BM25ContentFilter
+from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
+from crawl4ai.models import CrawlResult
+
+async def crawl_webpages(urls:list[str], prompt:str)-> CrawlResult:
+    bm25_filter=BM25ContentFilter(user_query=prompt, bm25_threshold=1.2)
+    md_generator=DefaultMarkdownGenerator(content_filter=bm25_filter)
+
+    crawler_config=CrawlerRunConfig(
+        markdown_generator=md_generator,
+        excluded_tags=["nav","footer","header","form","img","a"],
+        only_text=True,
+        excluded_social_media_links=True,
+        keep_data_attributes=False,
+        cache_mode=CacheMode.BYPASS,
+        remove_overlay_elements=True,
+        user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:109.0) AppleWebKit/537.36 ",
+        page_timeout=20000, # in ns:20 seconds
+    )
+    browser_config=BrowserConfig(headless=True, text_mode=True, light_mode=True)
+
+    async with AsyncWebCrawler(config=browser_config) as crawler:
+        results=await crawler.arun_many(urls, config=crawler_config)
+        return results
 
 def check_robots_txt(urls: list[str]) -> list[str]:
     allowed_urls=[]
@@ -24,16 +51,16 @@ def check_robots_txt(urls: list[str]) -> list[str]:
             allowed_urls.append(url)
     return allowed_urls
 
-def get_web_urls(search_term: str, numresults: int =10,)-> list[str]:
+def get_web_urls(search_term: str, numresults: int =5,)-> list[str]:
     try:
         discard_url=["youtube.com","bitanica.com","vimeo.com"]
         for url in discard_url:
             search_term += f"-site{url}"
         
-        #st.write(search_term)
+        st.write(search_term)
 
         results=DDGS().text(search_term,max_results=numresults)
-        #st.write(results)
+        st.write(results)
         return check_robots_txt(results)
     
     except Exception as e:

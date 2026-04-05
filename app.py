@@ -904,6 +904,230 @@ Instructions:
 - Minimum length: 3-4 detailed paragraphs""",
 }
 
+# ── Query Expansion ───────────────────────────────────────────────────────────
+
+def expand_query(prompt: str, query_type: str) -> list[str]:
+    """
+    Generate sub-queries covering different dimensions of the original query.
+    Uses gemma3:1b to produce 4 targeted sub-queries for deeper research.
+    """
+
+    expansion_prompts = {
+        "science": f"""You are a research assistant. Given this scientific query:
+"{prompt}"
+
+Generate exactly 4 different search queries that together cover ALL dimensions:
+1. Core concept and definition
+2. Latest research and recent developments
+3. Technical implementation and methodology
+4. Real-world applications and impact
+
+Return ONLY the 4 queries, one per line, no numbering, no explanation.""",
+
+        "news": f"""You are a news researcher. Given this news query:
+"{prompt}"
+
+Generate exactly 4 different search queries that together cover ALL dimensions:
+1. What happened — core facts and timeline
+2. Background and causes leading to this event
+3. Key people and organizations involved
+4. Impact, consequences and future implications
+
+Return ONLY the 4 queries, one per line, no numbering, no explanation.""",
+
+        "general": f"""You are a research assistant. Given this query:
+"{prompt}"
+
+Generate exactly 4 different search queries that together cover ALL dimensions:
+1. Basic facts, definition and overview
+2. Historical background and origin
+3. Current status, achievements and significance
+4. Criticism, controversies and different perspectives
+
+Return ONLY the 4 queries, one per line, no numbering, no explanation.""",
+    }
+
+    system_prompt = "You generate precise search queries. Return only the queries, nothing else."
+    expansion_prompt = expansion_prompts.get(query_type, expansion_prompts["general"])
+
+    try:
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model":  OLLAMA_MODEL,
+                "prompt": expansion_prompt,
+                "system": system_prompt,
+                "stream": False,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        raw = response.json().get("response", "")
+
+        # ── Parse sub-queries — one per line ──────────────────────────────────
+        sub_queries = [
+            line.strip()
+            for line in raw.strip().splitlines()
+            if line.strip() and len(line.strip()) > 10
+        ][:4]                          # cap at 4
+
+        # ── Fallback if expansion failed ──────────────────────────────────────
+        if len(sub_queries) < 2:
+            print(f"[QueryExpansion] Failed to parse — using original query")
+            return [prompt]
+
+        print(f"[QueryExpansion] Generated {len(sub_queries)} sub-queries:")
+        for i, q in enumerate(sub_queries):
+            print(f"  {i+1}. {q}")
+
+        return sub_queries
+
+    except Exception as e:
+        print(f"[QueryExpansion] Error: {e} — using original query")
+        return [prompt]
+
+# ── Async Multi-Search ────────────────────────────────────────────────────────
+
+async def async_multi_search(
+    sub_queries: list[str],
+    delay_between: float = 3.0,
+) -> dict[str, list[str]]:
+    """
+    Search all sub-queries with delay between each to avoid IP blocking.
+    Returns dict mapping sub-query → list of URLs found.
+    """
+    import asyncio
+
+    results = {}
+
+    for i, query in enumerate(sub_queries):
+        print(f"[MultiSearch] Searching ({i+1}/{len(sub_queries)}): {query}")
+
+        # ✅ Run search in thread pool — requests is not async-native
+        loop = asyncio.get_event_loop()
+        urls = await loop.run_in_executor(
+            None,
+            lambda q=query: get_web_urls(search_term=q)
+        )
+
+        results[query] = urls
+        print(f"[MultiSearch] Found {len(urls)} URLs for: {query}")
+
+        # ✅ Delay between searches — prevents IP blocking
+        if i < len(sub_queries) - 1:
+            wait = delay_between + random.uniform(0.5, 1.5)
+            print(f"[MultiSearch] Waiting {wait:.1f}s before next search...")
+            await asyncio.sleep(wait)
+
+    return results
+
+# ── Iterative Generation ──────────────────────────────────────────────────────
+
+def generate_dimension_answer(
+    original_prompt: str,
+    sub_query: str,
+    context: str,
+    dimension_num: int,
+    total_dimensions: int,
+    query_type: str,
+) -> str:
+    """
+    Generate a detailed answer for one dimension/sub-query.
+    """
+    system_prompt = f"""You are a comprehensive research analyst writing section {dimension_num} of {total_dimensions} of a deep research report.
+
+Your task: Answer this specific dimension of the research thoroughly.
+Original question: {original_prompt}
+This dimension: {sub_query}
+
+Instructions:
+- Write 2-3 detailed paragraphs specifically addressing this dimension
+- Use specific facts, dates, names, and figures from the context
+- Cite sources using [Source N] notation
+- Be analytical — do not just summarize, provide insight
+- This is ONE section of a larger report — stay focused on this dimension"""
+
+    full_prompt = f"""Context:
+{context}
+
+Dimension to address: {sub_query}
+
+Write a detailed section addressing this dimension:"""
+
+    try:
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model":  OLLAMA_MODEL,
+                "prompt": full_prompt,
+                "system": system_prompt,
+                "stream": False,
+            },
+            timeout=120,
+        )
+        response.raise_for_status()
+        return response.json().get("response", "")
+    except Exception as e:
+        print(f"[Generation] Error for dimension {dimension_num}: {e}")
+        return f"_(Could not generate content for this dimension: {e})_"
+
+
+def synthesize_final_report(
+    original_prompt: str,
+    dimension_answers: list[dict],
+    query_type: str,
+) -> str:
+    """
+    Combine all dimension answers into a cohesive final research report.
+    """
+    sections = "\n\n".join([
+        f"=== Dimension {i+1}: {d['sub_query']} ===\n{d['answer']}"
+        for i, d in enumerate(dimension_answers)
+        if d['answer']
+    ])
+
+    system_prompt = """You are a senior research editor creating a final comprehensive report.
+Your task is to synthesize multiple research sections into one cohesive, well-structured report.
+
+Instructions:
+- Combine all sections into a flowing, well-organized report
+- Use clear headers for each major section
+- Remove repetition but preserve all unique information
+- Ensure logical flow between sections
+- Add a brief Executive Summary at the start
+- Add Key Takeaways at the end
+- Maintain all source citations
+- The final report should be comprehensive and detailed"""
+
+    full_prompt = f"""Original Research Question: {original_prompt}
+
+Research sections to synthesize:
+{sections}
+
+Write the final comprehensive research report:"""
+
+    try:
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model":  OLLAMA_MODEL,
+                "prompt": full_prompt,
+                "system": system_prompt,
+                "stream": False,
+            },
+            timeout=180,               # longer timeout for synthesis
+        )
+        response.raise_for_status()
+        return response.json().get("response", "")
+    except Exception as e:
+        print(f"[Synthesis] Error: {e}")
+        # ✅ Fallback — return all dimension answers concatenated
+        return "\n\n".join([
+            f"### {d['sub_query']}\n{d['answer']}"
+            for d in dimension_answers
+            if d['answer']
+        ])
+
 def check_ollama_running() -> bool:
     try:
         response = requests.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
@@ -1017,110 +1241,191 @@ async def run():
 
     if prompt and go:
 
-        session_id = None
+        session_id  = None
+        query_type  = detect_query_type(prompt)
 
-        # ── Web search + crawl + store (only when toggle is ON) ───────────────
+        # ── Web search path ───────────────────────────────────────────────────
         if is_web_search:
 
-            with st.spinner("Searching the web..."):
-                web_urls = get_web_urls(search_term=prompt)
+            # ── Step 1: Expand query into sub-queries ─────────────────────────
+            with st.spinner("Expanding query into research dimensions..."):
+                sub_queries = expand_query(prompt, query_type)
 
-            if not web_urls:
-                st.error("No URLs found for your query.")
+            st.subheader("🔍 Research Dimensions")
+            for i, q in enumerate(sub_queries):
+                st.write(f"**Dimension {i+1}:** {q}")
+
+            # ── Step 2: Search all dimensions asynchronously ──────────────────
+            with st.spinner("Searching all dimensions (with delays to avoid blocking)..."):
+                search_results = await async_multi_search(
+                    sub_queries=sub_queries,
+                    delay_between=3.0,
+                )
+
+            # ── Step 3: Collect all unique URLs ───────────────────────────────
+            all_urls = []
+            seen_urls = set()
+            url_to_queries = {}            # track which sub-query each URL came from
+
+            for sub_query, urls in search_results.items():
+                for url in urls:
+                    if url not in seen_urls:
+                        all_urls.append(url)
+                        seen_urls.add(url)
+                    if url not in url_to_queries:
+                        url_to_queries[url] = []
+                    url_to_queries[url].append(sub_query)
+
+            st.subheader("🌐 URLs Found")
+            st.write(f"**{len(all_urls)} unique URLs** across all dimensions")
+            for url in all_urls:
+                queries_for_url = url_to_queries.get(url, [])
+                st.write(f"- {url} _(relevant to {len(queries_for_url)} dimension(s))_")
+
+            if not all_urls:
+                st.error("No URLs found across all dimensions.")
                 st.stop()
 
-            with st.spinner("Checking robots.txt..."):
-                allowed_urls = check_robots_txt(web_urls)
+            # ── Step 4: Robots.txt check ───────────────────────────────────────
+            with st.spinner("Checking robots.txt for all URLs..."):
+                allowed_urls = check_robots_txt(all_urls)
 
             if not allowed_urls:
                 st.error("All URLs blocked by robots.txt.")
                 st.stop()
 
-            st.subheader("URLs to Crawl")
-            for url in allowed_urls:
-                st.write(f"- {url}")
-
+            # ── Step 5: Crawl all URLs ─────────────────────────────────────────
             with st.spinner(f"Crawling {len(allowed_urls)} pages..."):
-                results = await crawl_webpages(urls=allowed_urls, prompt=prompt)
+                results = await crawl_webpages(
+                    urls=allowed_urls,
+                    prompt=prompt,
+                )
 
+            # ── Step 6: Store in ChromaDB ──────────────────────────────────────
             session_id = add_to_vector_database(
                 results=results,
                 prompt=prompt,
                 collection=collection,
             )
 
-        # ── Step 5: Query ChromaDB or answer directly ─────────────────────────
-        query_type = detect_query_type(prompt)
+        # ── Step 7: Check DB has data ─────────────────────────────────────────
+        if collection.count() == 0:
+            st.info("Database empty — answering from model knowledge only.")
+            _answer_directly(prompt, query_type)
+            st.stop()
 
-        if collection.count() > 0:
-            # ✅ DB has data — use RAG
-            with st.spinner("Retrieving relevant context..."):
+        # ── Step 8: Iterative generation — one answer per dimension ───────────
+        st.divider()
+        st.subheader("🔬 Deep Research Report")
+
+        if is_web_search and 'sub_queries' in locals():
+            dimensions = sub_queries
+        else:
+            # ✅ Toggle OFF — generate dimensions from existing DB
+            dimensions = expand_query(prompt, query_type)
+
+        dimension_answers = []
+        progress_bar = st.progress(0)
+        status_text  = st.empty()
+
+        for i, sub_query in enumerate(dimensions):
+
+            status_text.text(f"Researching dimension {i+1}/{len(dimensions)}: {sub_query}")
+
+            # ── Query DB for this dimension ────────────────────────────────────
+            try:
                 if session_id:
-                    # fresh session chunks first
-                    query_results = collection.query(
-                        query_texts=[prompt],
-                        n_results=min(10, collection.count()),
+                    dim_results = collection.query(
+                        query_texts=[sub_query],
+                        n_results=min(5, collection.count()),
                         where={"session_id": session_id},
                     )
-                    if not query_results["documents"][0]:
-                        query_results = collection.query(
-                            query_texts=[prompt],
-                            n_results=min(3, collection.count()),
+                    if not dim_results["documents"][0]:
+                        dim_results = collection.query(
+                            query_texts=[sub_query],
+                            n_results=min(5, collection.count()),
                         )
                 else:
-                    # toggle OFF — query all existing chunks
-                    query_results = collection.query(
-                        query_texts=[prompt],
-                        n_results=min(3, collection.count()),
+                    dim_results = collection.query(
+                        query_texts=[sub_query],
+                        n_results=min(5, collection.count()),
                     )
 
-            retrieved_docs  = query_results.get("documents",  [[]])[0]
-            retrieved_metas = query_results.get("metadatas",  [[]])[0]
+                dim_docs  = dim_results.get("documents",  [[]])[0]
+                dim_metas = dim_results.get("metadatas",  [[]])[0]
 
-            if retrieved_docs:
-                # ✅ Build context from DB
+            except Exception as e:
+                print(f"[Research] DB query error for dimension {i+1}: {e}")
+                dim_docs, dim_metas = [], []
+
+            # ── Build context for this dimension ──────────────────────────────
+            if dim_docs:
                 context_parts = []
-                for i, (doc, meta) in enumerate(zip(retrieved_docs, retrieved_metas)):
+                for j, (doc, meta) in enumerate(zip(dim_docs, dim_metas)):
                     source  = meta.get("source", "Unknown")
                     excerpt = doc[:800]
-                    context_parts.append(f"[Source {i+1} — {source}]\n{excerpt}")
-                context = "\n\n".join(context_parts)
+                    context_parts.append(f"[Source {j+1} — {source}]\n{excerpt}")
+                dim_context = "\n\n".join(context_parts)
 
-                # ✅ Cap total context size
-                if len(context) > 8000:
-                    context = context[:8000]
-                    print(f"[LLM] Context truncated to 8000 chars")
-
-                print(f"[LLM] Using RAG context — {len(context)} chars")
-
-                with st.spinner(f"Generating answer ({query_type} mode)..."):
-                    answer = query_llm(
-                        prompt=prompt,
-                        context=context,
-                        query_type=query_type,
-                    )
-
-                st.divider()
-                st.subheader("💡 Answer")
-                st.write(answer)
-
-                st.subheader("📚 Sources")
-                seen = set()
-                for meta in retrieved_metas:
-                    source = meta.get("source", "")
-                    if source and source not in seen:
-                        st.markdown(f"- {source}")
-                        seen.add(source)
-
+                if len(dim_context) > 6000:
+                    dim_context = dim_context[:6000]
             else:
-                # ✅ DB has chunks but none relevant — fall through to direct LLM
-                st.info("No relevant context found in DB — answering directly.")
-                _answer_directly(prompt, query_type)
+                dim_context = "No specific context found for this dimension."
 
-        else:
-            # ✅ DB is empty and toggle is OFF — answer directly without RAG
-            st.info("Web search is off and database is empty — answering from model knowledge.")
-            _answer_directly(prompt, query_type)
+            # ── Generate answer for this dimension ─────────────────────────────
+            answer = generate_dimension_answer(
+                original_prompt=prompt,
+                sub_query=sub_query,
+                context=dim_context,
+                dimension_num=i + 1,
+                total_dimensions=len(dimensions),
+                query_type=query_type,
+            )
+
+            dimension_answers.append({
+                "sub_query": sub_query,
+                "answer":    answer,
+                "sources":   list({m.get("source", "") for m in dim_metas}),
+            })
+
+            # ── Show dimension answer as it's generated ────────────────────────
+            with st.expander(
+                f"📖 Dimension {i+1}: {sub_query}",
+                expanded=(i == 0),     # expand first one by default
+            ):
+                st.write(answer)
+                if dim_metas:
+                    st.caption("Sources: " + ", ".join({
+                        m.get("source", "") for m in dim_metas
+                    }))
+
+            progress_bar.progress((i + 1) / len(dimensions))
+
+        status_text.text("Synthesizing final report...")
+
+        # ── Step 9: Synthesize all dimensions into final report ────────────────
+        with st.spinner("Synthesizing comprehensive report..."):
+            final_report = synthesize_final_report(
+                original_prompt=prompt,
+                dimension_answers=dimension_answers,
+                query_type=query_type,
+            )
+
+        progress_bar.progress(1.0)
+        status_text.text("✅ Research complete!")
+
+        st.divider()
+        st.subheader("📋 Final Research Report")
+        st.write(final_report)
+
+        # ── Step 10: All sources ───────────────────────────────────────────────
+        st.subheader("📚 All Sources")
+        all_sources = set()
+        for d in dimension_answers:
+            all_sources.update(d["sources"])
+        for source in sorted(all_sources):
+            if source:
+                st.markdown(f"- {source}")
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 

@@ -39,8 +39,8 @@ A production-grade, RAG-powered deep research tool that performs real-time multi
 ### Step 1 — Clone the repository
 
 ```bash
-git clone https://github.com/yourusername/llm-web-search.git
-cd llm-web-search
+git clone https://github.com/gitakhileshyadav/LLM-Based-Web-Research-System.git
+cd LLM-Based-Web-Research-System
 ```
 
 ### Step 2 — Create and activate virtual environment

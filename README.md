@@ -280,7 +280,13 @@ What are the recent breakthroughs in large language model reasoning?
 ```
 llm-web-search/
 |
-+-- app.py                  # Main application — all functions and Streamlit UI
++-- app.py                  # Main application — Streamlit UI and pipeline orchestration
++-- config.py               # All constants — models, SearXNG instances, domains, keywords
++-- search.py               # SearXNG search + IP-safe async multi-search
++-- robots.py               # robots.txt compliance checks
++-- crawler.py              # Dual-mode crawling + query-type / source-priority logic
++-- vectordb.py             # ChromaDB chunking, storage, cleanup + status display
++-- llm.py                  # Ollama calls — expansion, dimension answers, synthesis
 +-- requirements.txt        # Python dependencies
 +-- settings.yml            # SearXNG Docker configuration
 +-- limiter.toml            # SearXNG rate limit configuration
@@ -290,23 +296,23 @@ llm-web-search/
     +-- chroma.sqlite3      # Vector database with embeddings and metadata
 ```
 
-### Key functions in app.py
+### Key functions by module
 
-| Function | Purpose |
-|---|---|
-| expand_query() | LLM generates 4 research sub-queries |
-| async_multi_search() | Async search all dimensions with IP-safe delays |
-| check_robots_txt() | Parallel robots.txt compliance for all URLs |
-| crawl_webpages() | Dual-mode crawling — standard and JS-heavy configs |
-| detect_query_type() | Classify query as science / news / general |
-| prioritize_urls() | Reorder URLs by source reputation |
-| clean_markdown_content() | Strip ads, trackers, and HTML noise |
-| add_to_vector_database() | Chunk, embed, and store with structured metadata |
-| clear_collection_for_urls() | Delete stale chunks before new crawl |
-| generate_dimension_answer() | RAG answer for one research dimension |
-| synthesize_final_report() | Combine all dimensions into final report |
-| query_llm() | Send prompt and context to Ollama |
-| _answer_directly() | Direct LLM answer when database is empty |
+| Function | Module | Purpose |
+|---|---|---|
+| expand_query() | llm.py | LLM generates 4 research sub-queries |
+| async_multi_search() | search.py | Async search all dimensions with IP-safe delays |
+| check_robots_txt() | robots.py | Parallel robots.txt compliance for all URLs |
+| crawl_webpages() | crawler.py | Dual-mode crawling — standard and JS-heavy configs |
+| detect_query_type() | crawler.py | Classify query as science / news / general |
+| prioritize_urls() | crawler.py | Reorder URLs by source reputation |
+| clean_markdown_content() | vectordb.py | Strip ads, trackers, and HTML noise |
+| add_to_vector_database() | vectordb.py | Chunk, embed, and store with structured metadata |
+| clear_collection_for_urls() | vectordb.py | Delete stale chunks before new crawl |
+| generate_dimension_answer() | llm.py | RAG answer for one research dimension |
+| synthesize_final_report() | llm.py | Combine all dimensions into final report |
+| query_llm() | llm.py | Send prompt and context to Ollama |
+| _answer_directly() | llm.py | Direct LLM answer when database is empty |
 
 ---
 
@@ -328,15 +334,19 @@ llm-web-search/
 
 ## Environment Variables
 
-This project does not use a .env file. All configuration is done directly in app.py via constants at the top of the file.
+This project does not use a .env file. All configuration is done directly in config.py via constants.
 
 Key settings to adjust before running:
 
 ```python
 # Model selection
-OLLAMA_MODEL    = "gemma3:1b"           # 1.5 GB — for 8 GB RAM
+# OLLAMA_MODEL  = "gemma3:1b"           # 1.5 GB — for 8 GB RAM
 # OLLAMA_MODEL  = "gemma3:4b"           # 3.3 GB — for 16 GB RAM (better quality)
+OLLAMA_MODEL    = "gemma4:31b-cloud"
 OLLAMA_BASE_URL = "http://localhost:11434"
+
+# Embedding model (ChromaDB)
+EMBEDDING_MODEL = "nomic-embed-text"
 
 # SearXNG instances
 SEARXNG_INSTANCES = [
@@ -347,15 +357,18 @@ SEARXNG_INSTANCES = [
 
 # Domains to exclude from search results
 DISCARD_DOMAINS = [
-    "youtube.com", "spotify.com", "reddit.com",
-    "facebook.com", "instagram.com", "twitter.com",
+    "youtube.com", "britannica.com", "vimeo.com",
+    "spotify.com", "gaana.com",
+    "reddit.com", "quora.com",
+    "facebook.com", "instagram.com",
+    "twitter.com", "x.com",
 ]
 
 # Content quality
-bm25_threshold     = 1.0   # lower = more content, higher = stricter filtering
-MAX_CHUNKS_PER_URL = 12    # max chunks stored per source URL
-chunk_size         = 400   # characters per chunk
-chunk_overlap      = 50    # overlap between consecutive chunks
+BM25_THRESHOLD     = 1.5   # lower = more content, higher = stricter filtering
+MAX_CHUNKS_PER_URL = 20    # max chunks stored per source URL
+CHUNK_SIZE         = 500   # characters per chunk
+CHUNK_OVERLAP      = 80    # overlap between consecutive chunks
 ```
 
 ---

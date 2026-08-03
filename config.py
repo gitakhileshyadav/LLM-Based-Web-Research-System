@@ -49,6 +49,27 @@ MAX_QUERY_LENGTH = 200
 MAX_SEARCH_RESULTS = 5
 SEARCH_CANDIDATE_POOL = 25
 
+# ── Pre-crawl URL curation ────────────────────────────────────────────────────
+
+# A non-trusted URL must share at least this many substantive query tokens with
+# the prompt to survive the pre-crawl filter (kills single-word matches like
+# impact.com matching only "impact"). Applied ONLY when the pool is large.
+MIN_URL_TOKEN_OVERLAP = 2
+
+# When the merged URL pool is at or below this size (e.g. most engines are
+# suspended and a search only returned a handful of links), curation goes
+# LENIENT: it only drops non-trusted root homepages and still applies the
+# domain cap, but does NOT apply the token-overlap filter or the total cap.
+# Over-filtering a tiny pool was the cause of a run ending with one useless
+# portal URL and an empty answer.
+CURATION_LENIENT_MAX_URLS = 6
+
+# Max URLs kept per host after dedup (kills 5 near-identical impact.* variants).
+MAX_URLS_PER_DOMAIN = 3
+
+# Hard cap on the total URL list handed to the crawler (priority-ordered).
+MAX_CRAWL_URLS = 12
+
 
 # ── Vector Database ───────────────────────────────────────────────────────────
 

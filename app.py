@@ -23,7 +23,7 @@ if sys.platform == "win32":
 
 # ── Local modules ─────────────────────────────────────────────────────────────
 
-from crawler import crawl_webpages, detect_query_type
+from crawler import crawl_webpages, curate_urls, detect_query_type
 from llm import (
     _answer_directly,
     expand_query,
@@ -77,14 +77,25 @@ async def run():
             with st.spinner("Expanding query into research dimensions..."):
                 sub_queries = expand_query(prompt, query_type)
 
+            # Always search the ORIGINAL topic verbatim first - the exact title
+            # is what returns the truly relevant links (e.g. searching "Student
+            # protest India 2026" brings up the Wikipedia/Reuters/Al Jazeera
+            # pages). LLM dimensions supplement it, never replace it.
+            prompt_key = prompt.strip().lower()
+            search_queries = [prompt] + [
+                q for q in sub_queries
+                if q.strip().lower() != prompt_key
+            ]
+
             st.subheader("🔍 Research Dimensions")
-            for i, q in enumerate(sub_queries):
-                st.write(f"**Dimension {i+1}:** {q}")
+            for i, q in enumerate(search_queries):
+                label = "Original topic" if i == 0 else f"Dimension {i}"
+                st.write(f"**{label}:** {q}")
 
             # ── Step 2: Search all dimensions asynchronously ──────────────────
             with st.spinner("Searching all dimensions (with delays to avoid blocking)..."):
                 search_results = await async_multi_search(
-                    sub_queries=sub_queries,
+                    sub_queries=search_queries,
                     delay_between=3.0,
                 )
 
@@ -101,6 +112,12 @@ async def run():
                     if url not in url_to_queries:
                         url_to_queries[url] = []
                     url_to_queries[url].append(sub_query)
+
+            # ── Step 3b: Pre-crawl curation ───────────────────────────────────
+            # Drop non-trusted root homepages, single-token matches (impact.com
+            # matching only "impact"), domain dupes, and overflow. Trusted
+            # news/science/priority domains pass through unconditionally.
+            all_urls = curate_urls(all_urls, prompt, query_type)
 
             st.subheader("🌐 URLs Found")
             st.write(f"**{len(all_urls)} unique URLs** across all dimensions")

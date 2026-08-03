@@ -62,7 +62,7 @@ _STOPWORDS = {
 }
 
 
-def _tokenize(text: str) -> list[str]:
+def tokenize(text: str) -> list[str]:
     return [
         t for t in _TOKEN_RE.findall((text or "").lower())
         if t not in _STOPWORDS
@@ -83,12 +83,12 @@ def _rank_sources(query: str, results: list[dict], top_n: int) -> list[dict]:
     if not results:
         return []
 
-    query_tokens = _tokenize(query)
+    query_tokens = tokenize(query)
     if not query_tokens:
         return results[:top_n]
 
     corpus = [
-        _tokenize(f"{r.get('title', '')} {r.get('content', '')}")
+        tokenize(f"{r.get('title', '')} {r.get('content', '')}")
         for r in results
     ]
 
@@ -328,12 +328,14 @@ def get_web_urls(
         print(f"[Security] Query rejected: {e}")
         return []
 
-    # Append "-site domain" exclusions for every domain we never want.
-    # NOTE: use "-site domain" (space) - "-site:domain" (colon) makes the
-    # bing engine return zero results. Bing-specific quirk discovered upstream.
+    # NOTE: we deliberately do NOT append "-site domain" exclusions to the
+    # query text. DISCARD_DOMAINS are already enforced post-hoc in
+    # _query_one_engine_set() (any URL whose host matches is skipped), so
+    # appending them here only bloated the query and made Bing misparse
+    # multi-word phrases - it started returning generic single-word matches
+    # instead of the actual topic. The clean full sentence is sent as-is so
+    # the engine matches the whole topic ("Student protest India 2026").
     search_term_with_excludes = search_term
-    for domain in DISCARD_DOMAINS:
-        search_term_with_excludes += f" -site {domain}"
 
     # Build the list of engine sets to try in order.
     if engine_set is not None:

@@ -15,6 +15,8 @@ Key changes vs the previous implementation:
   "unscrapable" JS sites that returned empty despite a 200.
 """
 
+from urllib.parse import urlparse
+
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.content_filter_strategy import BM25ContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
@@ -23,13 +25,18 @@ from crawl4ai.models import CrawlResult
 from config import (
     BM25_THRESHOLD,
     CRAWLER_USER_AGENT,
+    CURATION_LENIENT_MAX_URLS,
     JS_HEAVY_DOMAINS,
+    MAX_CRAWL_URLS,
+    MAX_URLS_PER_DOMAIN,
+    MIN_URL_TOKEN_OVERLAP,
     NEWS_DOMAINS,
     NEWS_KEYWORDS,
     SCIENCE_KEYWORDS,
     SCIENTIFIC_DOMAINS,
 )
 from fetcher import fallback_fetch
+from search import tokenize
 
 # Below this character count, the crawl4ai result is considered extractively
 # failed and we hand the URL to the httpx+trafilatura fallback layer. 200
@@ -84,6 +91,83 @@ def prioritize_urls(urls: list[str], query_type: str) -> list[str]:
 
 def is_js_heavy(url: str) -> bool:
     return any(domain in url for domain in JS_HEAVY_DOMAINS)
+
+
+_TRUSTED_DOMAINS = set(
+    NEWS_DOMAINS
+    + SCIENTIFIC_DOMAINS
+    + JS_HEAVY_DOMAINS
+    + [
+        "wikipedia.org", "britannica.com", "worldhistory.org",
+        "newworldencyclopedia.org", "hrw.org",
+    ]
+)
+
+
+def _is_trusted_host(url: str) -> bool:
+    parsed = urlparse(url)
+    host = (parsed.hostname or "").lower()
+    return any(d in host for d in _TRUSTED_DOMAINS)
+
+
+def curate_urls(urls: list[str], prompt: str, query_type: str) -> list[str]:
+    """
+    Pre-crawl curation, adaptive to pool size so we never over-filter.
+
+    MODERATE mode (pool > CURATION_LENIENT_MAX_URLS):
+      - drops non-trusted root homepages (path empty or '/'),
+      - drops non-trusted URLs sharing fewer than MIN_URL_TOKEN_OVERLAP
+        substantive prompt tokens (e.g. impact.com matching only "impact"),
+      - dedupes to MAX_URLS_PER_DOMAIN per host,
+      - caps the total at MAX_CRAWL_URLS.
+
+    LENIENT mode (pool <= CURATION_LENIENT_MAX_URLS): when engines are
+    suspended and search only returned a handful of links, every URL counts.
+    We keep everything except obvious non-trusted root homepages and still
+    apply the per-host cap - but skip the token-overlap filter and the total
+    cap. This prevents a degraded search from collapsing into a single
+    useless portal URL.
+
+    Trusted news/scientific/priority domains always pass through. Each drop
+    is logged with its reason for visibility.
+    """
+    prompt_tokens = set(tokenize(prompt))
+    lenient = len(urls) <= CURATION_LENIENT_MAX_URLS
+
+    kept: list[str] = []
+    host_counts: dict[str, int] = {}
+
+    for url in urls:
+        reason = None
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").lower()
+        is_root = parsed.path.rstrip("/") in ("", "/")
+
+        if not _is_trusted_host(url) and is_root:
+            reason = "root homepage"
+
+        if reason is None and not lenient and not _is_trusted_host(url):
+            url_tokens = set(tokenize(f"{host} {parsed.path}"))
+            min_overlap = min(MIN_URL_TOKEN_OVERLAP, len(prompt_tokens) or 1)
+            if len(prompt_tokens.intersection(url_tokens)) < min_overlap:
+                reason = "low relevance"
+
+        if reason is None and host_counts.get(host, 0) >= MAX_URLS_PER_DOMAIN:
+            reason = "domain cap"
+
+        if reason is None:
+            kept.append(url)
+            host_counts[host] = host_counts.get(host, 0) + 1
+        else:
+            print(f"[Crawl] Filtered: {url} ({reason})")
+
+    if not lenient and len(kept) > MAX_CRAWL_URLS:
+        kept = kept[:MAX_CRAWL_URLS]
+        print(f"[Crawl] Capped to {MAX_CRAWL_URLS} URLs")
+
+    print(f"[Crawl] Curation ({'lenient' if lenient else 'moderate'}): "
+          f"{len(kept)} of {len(urls)} URLs kept")
+    return kept
 
 
 async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:

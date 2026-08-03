@@ -196,6 +196,18 @@ curl "http://localhost:8080/search?q=test&format=json"
 
 You should see a JSON response containing a results array with search results.
 
+**6g — (Optional but recommended) Add Valkey/Redis for the limiter:**
+
+SearXNG uses a Valkey/Redis-compatible store to back its rate-limiter's link-token. Without it the limiter only partially works.
+
+```bash
+docker network create searxng-net
+docker run -d --name searxng-redis --network searxng-net redis:alpine
+docker network connect searxng-net searxng
+```
+
+The `searxng_config/limiter.toml` already whitelists the Docker bridge gateways (`172.17.0.1`, `172.20.0.1`) so your app requests from `localhost:8080` are never rate-limited.
+
 ---
 
 ## Usage
@@ -264,6 +276,7 @@ What are the recent breakthroughs in large language model reasoning?
 - **Async multi-search** — searches all 4 dimensions simultaneously with IP-safe delays between requests
 - **Dual crawl strategy** — lightweight mode for standard sites, full-browser JS rendering for BBC, Reuters, Guardian
 - **Source prioritization** — science queries hit arxiv and HuggingFace first; news queries hit Reuters and BBC first
+- **BM25 source ranking** — search results are ranked against the query; only the most relevant sources are forwarded to the crawler
 - **BM25 content filtering** — keeps only query-relevant sentences, discards all noise
 - **Ad and tracker removal** — 24+ CSS selectors strip ads, cookie banners, and popups before storage
 - **Structured vector storage** — every chunk tagged with session_id, chunk_index, source, crawled_at, and query
@@ -365,8 +378,9 @@ DISCARD_DOMAINS = [
 ]
 
 # Content quality
-BM25_THRESHOLD     = 1.5   # lower = more content, higher = stricter filtering
-MAX_CHUNKS_PER_URL = 20    # max chunks stored per source URL
+BM25_THRESHOLD        = 1.5   # lower = more content, higher = stricter filtering
+SEARCH_CANDIDATE_POOL = 25    # raw results collected per query before BM25 re-ranking
+MAX_CHUNKS_PER_URL    = 20    # max chunks stored per source URL
 CHUNK_SIZE         = 500   # characters per chunk
 CHUNK_OVERLAP      = 80    # overlap between consecutive chunks
 ```

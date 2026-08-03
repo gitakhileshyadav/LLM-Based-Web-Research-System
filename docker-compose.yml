@@ -1,0 +1,75 @@
+# Docker Compose for SearXNG + Redis (valkey-compatible) used by the LLM Web Search app.
+#
+# Fixes the original issue: searxng started before searxng-redis was ready,
+# causing "can't connect valkey DB" -> limiter failure -> erratic ranking.
+#
+# This stack:
+#   1. Puts both containers on a single bridge network (so the `searxng-redis`
+#      hostname is always resolvable from `searxng`).
+#   2. Uses `depends_on` with a `service_healthy` condition backed by a real
+#      TCP/PING healthcheck, so searxng only starts after redis is accepting
+#      connections.
+#   3. Pins the SearXNG image by digest for reproducible upgrades
+#      (today: 2026.8.1-8892414dc / digest ec536bcd..., released 2026-08-01).
+#   4. Persists redis data via a named volume so the result cache survives
+#      restarts.
+#
+# Run:
+#   docker compose pull
+#   docker compose up -d
+#   docker compose logs -f searxng
+
+services:
+  searxng-redis:
+    image: redis:8-alpine
+    container_name: searxng-redis
+    # Persist keys; AOF is more durable than the default RDB snapshot.
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - searxng-redis-data:/data
+    networks:
+      - searxng-net
+    healthcheck:
+      # `redis-cli ping` returns "PONG" only when the server is ready to
+      # accept commands. SearXNG's valkey client uses the RESP protocol, so
+      # this is an accurate readiness signal.
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  searxng:
+    # Pinned to the 2026-08-01 build by digest (image tag 2026.8.1-8892414dc).
+    # To upgrade: bump the tag below AND update the digest to the new tag's
+    # digest (`docker pull searxng/searxng:<new-tag>` then read itsDigest).
+    image: searxng/searxng:2026.8.1-8892414dc
+    container_name: searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      # Bind-mount the local config directory so edits to
+      # searxng_config/settings.yml + limiter.toml are picked up on restart.
+      - ./searxng_config:/etc/searxng:rw
+    environment:
+      # Public URL used to build absolute links in the JSON API response.
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      # Secret key for session cookies / signing. Keep this value private.
+      - SEARXNG_SECRET=mysecretkey123
+      # Limiter is disabled in settings.yml because the app connects to
+      # localhost:8080 directly (no reverse proxy to set X-Forwarded-For).
+      - SEARXNG_LIMITER=false
+    depends_on:
+      searxng-redis:
+        condition: service_healthy
+    networks:
+      - searxng-net
+    restart: unless-stopped
+
+networks:
+  searxng-net:
+    driver: bridge
+
+volumes:
+  searxng-redis-data:

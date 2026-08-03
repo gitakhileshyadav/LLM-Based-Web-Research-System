@@ -1,9 +1,27 @@
+# SearXNG limiter configuration.
+#
+# NOTE (2026-08-01): This file is NOT loaded while `server.limiter: false` in
+# settings.yml. It is kept here inactive so that if SearXNG is later placed
+# behind a reverse proxy (nginx/caddy) that sets X-Forwarded-For / X-Real-IP,
+# you can flip `limiter: true` and this config will apply immediately.
+#
+# The limiter requires Valkey for its `link_token` bot-detection feature to
+# work reliably across requests. See:
+#   https://docs.searxng.org/admin/searx.limiter.html
+
 [botdetection.ip_limit]
+# When true (default), SearXNG stores a per-IP link_token in Valkey to detect
+# bots that scrape result pages without ever loading the search form first.
 link_token = true
 
 [botdetection.ip_lists]
+# IP ranges that bypass rate limiting entirely. Add your reverse-proxy IP
+# and any trusted internal callers here. The host's docker bridge gateway is
+# already on the pass-list so the local Streamlit app is never throttled.
 block_ip = []
 pass_ip = [
   "127.0.0.1",
-  "::1"
+  "::1",
+  "172.17.0.1",      # Docker default bridge gateway (host -> container)
+  "172.20.0.1",      # searxng-net gateway (compose network)
 ]

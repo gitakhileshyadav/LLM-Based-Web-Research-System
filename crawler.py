@@ -1,5 +1,19 @@
-"""Crawling layer — domain intelligence, source prioritization, and dual-mode
-(standard / JS-heavy) crawling with crawl4ai + aggressive content cleaning."""
+"""Crawling layer - domain intelligence, source prioritization, and dual-mode
+(standard / JS-heavy) crawling with crawl4ai + aggressive content cleaning.
+
+Key changes vs the previous implementation:
+- CacheMode.ENABLED (was BYPASS): repeated crawls of the same URL within the
+  cache TTL are now instant. This matters because Streamlit re-runs the whole
+  script on every interaction - previously every re-run re-crawled every URL.
+- Priority URLs are crawled first (still serially - see the note at Step 8
+  on why we avoid `arun_many` in this crawl4ai version).
+- A single retry is attempted when crawl4ai returns empty / errored content,
+  before falling through to the fetcher.py fallback layer.
+- After crawl4ai finishes, any URL whose extracted text is shorter than
+  _FALLBACK_MIN_CHARS is re-fetched via fetcher.fallback_fetch() (httpx +
+  trafilatura + BeautifulSoup raw scrape). This is what rescues
+  "unscrapable" JS sites that returned empty despite a 200.
+"""
 
 from crawl4ai import AsyncWebCrawler, BrowserConfig, CacheMode, CrawlerRunConfig
 from crawl4ai.content_filter_strategy import BM25ContentFilter
@@ -15,6 +29,12 @@ from config import (
     SCIENCE_KEYWORDS,
     SCIENTIFIC_DOMAINS,
 )
+from fetcher import fallback_fetch
+
+# Below this character count, the crawl4ai result is considered extractively
+# failed and we hand the URL to the httpx+trafilatura fallback layer. 200
+# chars is roughly one paragraph - the minimum useful unit for RAG context.
+_FALLBACK_MIN_CHARS = 200
 
 
 def detect_query_type(prompt: str) -> str:
@@ -125,7 +145,7 @@ async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
         "[id*='outbrain']",        "[id*='disqus']",
     ])
 
-    # ── Step 4: Standard config — fast, for normal sites ─────────────────────
+    # ── Step 4: Standard config - fast, for normal sites ─────────────────────
     standard_config = CrawlerRunConfig(
         markdown_generator=md_generator,
         excluded_tags=EXCLUDED_TAGS,
@@ -133,30 +153,33 @@ async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
         only_text=True,
         keep_data_attributes=False,
         remove_overlay_elements=True,
-        cache_mode=CacheMode.BYPASS,
+        # Was BYPASS - that re-crawled every URL on every Streamlit re-run.
+        # ENABLED reuses the in-process cache when the same URL is requested
+        # again within the session, which is the common case for this app.
+        cache_mode=CacheMode.ENABLED,
         word_count_threshold=50,
-        page_timeout=30000,
-        delay_before_return_html=3.0,
+        page_timeout=20000,            # was 30000 - 20s is plenty for static
+        delay_before_return_html=2.0, # was 3.0 - shave 1s per page
         user_agent=CRAWLER_USER_AGENT,
     )
 
-    # ── Step 5: JS-heavy config — slower, full browser for news/media ─────────
+    # ── Step 5: JS-heavy config - slower, full browser for news/media ─────────
     js_config = CrawlerRunConfig(
         markdown_generator=md_generator,
         excluded_tags=EXCLUDED_TAGS,
         excluded_selector=EXCLUDED_SELECTORS,
-        only_text=False,               # ✅ must be False — JS needs full render
+        only_text=False,               # ✅ must be False - JS needs full render
         keep_data_attributes=False,
         remove_overlay_elements=True,
-        cache_mode=CacheMode.BYPASS,
-        word_count_threshold=30,       # lower threshold — news articles are shorter
+        cache_mode=CacheMode.ENABLED,  # was BYPASS
+        word_count_threshold=30,      # lower threshold - news articles are shorter
 
         # ✅ Key JS-site settings
         page_timeout=45000,            # 45s for heavy JS frameworks
         delay_before_return_html=5.0,  # 5s for JS to fully render
         wait_for="css:article,main,p", # wait for content elements in DOM
 
-        # ✅ Scroll simulation — triggers lazy-loaded content
+        # ✅ Scroll simulation - triggers lazy-loaded content
         js_code=[
             "window.scrollTo(0, document.body.scrollHeight / 2);",
             "await new Promise(r => setTimeout(r, 1500));",
@@ -200,7 +223,7 @@ async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
     all_results = []
 
 
-    # ── Step 8: Crawl standard sites — priority first ─────────────────────────
+    # ── Step 8: Crawl standard sites - priority first ─────────────────────────
     if standard_urls:
         priority_standard = [u for u in standard_urls if any(
             d in u for d in {
@@ -214,41 +237,126 @@ async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
         all_standard = priority_standard + other_standard
         print(f"[Crawl] Standard sites (ordered): {all_standard}")
 
+        # NOTE: crawls are serial (one `arun` per URL) rather than via
+        # `arun_many`. In crawl4ai 0.4.248 the dispatcher path used by
+        # `arun_many` does NOT run the markdown generator's BM25 content
+        # filter - every result comes back with empty `fit_markdown` while
+        # the unfiltered `markdown` is intact. That silently disables the
+        # query-relevance step this app depends on, so we stay on serial
+        # `arun`, which applies the filter correctly.
         async with AsyncWebCrawler(config=standard_browser) as crawler:
-            # ✅ Crawl priority URLs first one by one to preserve order
-            for url in priority_standard:
+            for url in all_standard:
                 try:
                     result = await crawler.arun(url, config=standard_config)
-                    all_results.append(result)
-                    print(f"[Crawl] Priority done: {url} — "
-                          f"{len(result.fit_markdown) if hasattr(result, 'fit_markdown') and result.fit_markdown else 0} chars")
                 except Exception as e:
-                    print(f"[Crawl] Priority failed: {url} — {e}")
-
-            # ✅ Crawl remaining in batch
-            if other_standard:
-                results = await crawler.arun_many(other_standard, config=standard_config)
-                all_results.extend(results)
-                for r in results:
-                    print(f"[Crawl] Standard done: {r.url} — "
-                          f"{len(r.fit_markdown) if hasattr(r, 'fit_markdown') and r.fit_markdown else 0} chars")
+                    print(f"[Crawl] Standard failed: {url} - {e}")
+                    result = None
+                fixed = await _maybe_retry_and_fallback(
+                    crawler, result, standard_config, prompt
+                )
+                all_results.append(fixed)
+                _log_crawl("Standard", fixed)
 
     # ── Step 9: Crawl JS-heavy sites one at a time ────────────────────────────
+    # JS-heavy sites are kept serial: they each spin up a full browser and
+    # running them in parallel would balloon memory (each chromium is ~150MB).
     if js_urls:
         print(f"[Crawl] JS-heavy sites: {js_urls}")
         async with AsyncWebCrawler(config=js_browser) as crawler:
             for url in js_urls:
                 try:
                     result = await crawler.arun(url, config=js_config)
-                    all_results.append(result)
-                    content_len = (
-                        len(result.fit_markdown)
-                        if hasattr(result, "fit_markdown") and result.fit_markdown
-                        else len(result.markdown) if result.markdown else 0
-                    )
-                    print(f"[Crawl] JS done: {url} — {content_len} chars")
-
                 except Exception as e:
-                    print(f"[Crawl] JS failed: {url} — {e}")
+                    print(f"[Crawl] JS arun failed: {url} - {e}")
+                    result = None
+                fixed = await _maybe_retry_and_fallback(
+                    crawler, result, js_config, prompt
+                )
+                all_results.append(fixed)
+                _log_crawl("JS", fixed)
 
     return all_results
+
+
+# ---------------------------------------------------------------------------
+# Helpers: retry, fallback bridging, logging
+# ---------------------------------------------------------------------------
+
+async def _maybe_retry_and_fallback(
+    crawler: AsyncWebCrawler,
+    result: CrawlResult,
+    config: CrawlerRunConfig,
+    prompt: str,
+) -> CrawlResult:
+    """
+    If crawl4ai returned empty/errored content for `result.url`, retry once
+    with the same config. If still below _FALLBACK_MIN_CHARS, hand off to
+    fetcher.fallback_fetch() (httpx + trafilatura + BS4) and patch the
+    result's markdown fields in place, so the downstream pipeline still sees
+    a CrawlResult-shaped object.
+    """
+    current = result
+    for attempt in (1, 2):
+        if current is None:
+            content_len = 0
+        else:
+            content_len = _content_len(current)
+        if content_len >= _FALLBACK_MIN_CHARS:
+            return current
+        if attempt == 2:
+            break
+        print(f"[Crawl] Retry {result.url if result else '?'} - only {content_len} chars")
+        try:
+            current = await crawler.arun(result.url, config=config)
+        except Exception as e:
+            print(f"[Crawl] Retry failed {result.url} - {e}")
+            current = None
+
+    # Still empty after retry -> invoke fetcher fallback.
+    url = result.url if result else "?"
+    fb = await fallback_fetch(url, prompt)
+    if not fb:
+        return current
+    print(f"[Crawl] Fallback OK {url} - {len(fb)} chars")
+    return _make_fallback_result(url, fb)
+
+
+def _content_len(result: CrawlResult) -> int:
+    if hasattr(result, "fit_markdown") and result.fit_markdown:
+        return len(result.fit_markdown)
+    if getattr(result, "markdown", None):
+        return len(result.markdown)
+    return 0
+
+
+def _log_crawl(label: str, result: CrawlResult) -> None:
+    print(f"[Crawl] {label} done: {result.url} - {_content_len(result)} chars")
+
+
+def _make_fallback_result(url: str, text: str) -> CrawlResult:
+    """
+    Build a minimal CrawlResult wrapper around plain text fetched by the
+    fallback layer. We set both `markdown` and `fit_markdown` so the
+    downstream code in app.py / vectordb.py that reads `result.fit_markdown`
+    keeps working without a special case.
+    """
+    # CrawlResult is a pydantic model in crawl4ai; `html` and `success` are
+    # required fields - omitting them raises a ValidationError that crashes
+    # the whole crawl once a fallback fires. Construct with safe defaults.
+    try:
+        return CrawlResult(
+            url=url,
+            html="",
+            success=True,
+            markdown=text,
+            fit_markdown=text,
+            metadata={},
+        )
+    except Exception:
+        # Older crawl4ai versions may not accept fit_markdown at construction.
+        r = CrawlResult(url=url, html="", success=True, markdown=text, metadata={})
+        try:
+            r.fit_markdown = text
+        except Exception:
+            pass
+        return r

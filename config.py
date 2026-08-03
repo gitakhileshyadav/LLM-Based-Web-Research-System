@@ -24,14 +24,16 @@ SEARXNG_INSTANCES = [
     "https://searxng.world",            # fallback 2
 ]
 
+# Domains to exclude from every search via "-site domain".
+# Trimmed from 18 to the critical few: the dictionary/definition sites are
+# already dropped by the _DEFINITION_TITLE_RE + BM25 filters in search.py,
+# so listing them here only bloated every query and caused Bing to misparse
+# multi-word phrases (it started returning generic "Student" pages for a
+# "student protests India 2024" query). Only keep domains that would waste a
+# crawl slot (login walls / crawler blocks).
 DISCARD_DOMAINS = [
-    "youtube.com", "britannica.com", "vimeo.com",
-    "spotify.com", "gaana.com",
-    "reddit.com",                  # blocks crawlers
-    "quora.com",                   # blocks crawlers
-    "facebook.com",                # requires login
-    "instagram.com",               # requires login
-    "twitter.com", "x.com",        # requires login
+    "youtube.com", "reddit.com", "quora.com",
+    "facebook.com", "instagram.com", "twitter.com",
 ]
 
 BLOCKED_HOSTS = [
@@ -45,6 +47,7 @@ BLOCKED_HOSTS = [
 ALLOWED_SCHEMES  = {"http", "https"}
 MAX_QUERY_LENGTH = 200
 MAX_SEARCH_RESULTS = 5
+SEARCH_CANDIDATE_POOL = 25
 
 
 # ── Vector Database ───────────────────────────────────────────────────────────

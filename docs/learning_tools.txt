@@ -1,0 +1,6 @@
+1.headless Chromium browser?
+2.Cosine similarity search in Vector DB?
+3.What is vLLM?
+4.
+Ans. SearXNG is an open-source metasearch engine that aggregates results from multiple search engines 
+(Google, Bing, DuckDuckGo, etc.) and returns them without tracking users.

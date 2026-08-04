@@ -229,7 +229,7 @@ docker start searxng
 ### Step 3 — Run the app
 
 ```bash
-streamlit run app.py
+streamlit run app/main.py
 ```
 
 Open http://localhost:8501 in your browser.
@@ -293,16 +293,27 @@ What are the recent breakthroughs in large language model reasoning?
 ```
 llm-web-search/
 |
-+-- app.py                  # Main application — Streamlit UI and pipeline orchestration
-+-- config.py               # All constants — models, SearXNG instances, domains, keywords
-+-- search.py               # SearXNG search + IP-safe async multi-search
-+-- robots.py               # robots.txt compliance checks
-+-- crawler.py              # Dual-mode crawling + query-type / source-priority logic
-+-- vectordb.py             # ChromaDB chunking, storage, cleanup + status display
-+-- llm.py                  # Ollama calls — expansion, dimension answers, synthesis
++-- app/                    # Main application package
+|   +-- main.py             # Main application — Streamlit UI and pipeline orchestration
+|   +-- config.py           # All constants — models, SearXNG instances, domains, keywords
+|   +-- search.py           # SearXNG search + IP-safe async multi-search
+|   +-- robots.py           # robots.txt compliance checks
+|   +-- crawler.py          # Dual-mode crawling + query-type / source-priority logic
+|   +-- vectordb.py         # ChromaDB chunking, storage, cleanup + status display
+|   +-- llm.py              # Ollama calls — expansion, dimension answers, synthesis
+|   +-- __init__.py         # Package marker
+|
++-- docker/                 # Container packaging
+|   +-- Dockerfile          # App image recipe (python:3.11-slim + Playwright)
+|   +-- .dockerignore       # Files excluded from the image build
+|   +-- docker-compose.app.yml  # Full stack: SearXNG + Redis + app
+|
++-- docker-compose.yml      # SearXNG + Redis local stack (development)
++-- searxng_config/         # SearXNG Docker configuration
+|   +-- settings.yml        # SearXNG settings (engines, languages, timeouts)
+|   +-- limiter.toml        # SearXNG rate limit configuration
+|
 +-- requirements.txt        # Python dependencies
-+-- settings.yml            # SearXNG Docker configuration
-+-- limiter.toml            # SearXNG rate limit configuration
 +-- README.md               # This file
 |
 +-- web-search-llm-db/      # ChromaDB persistent storage (auto-created on first run)

@@ -1,0 +1,264 @@
+1.Install the python 3.11.9 
+2. Verify Installation
+
+Open Command Prompt and run:
+
+py -0
+
+Expected output should show both versions:
+
+Installed Pythons:
+ - 3.13
+ - 3.11
+
+3. Go to Your Project Folder
+
+Example:
+
+cd D:\Minor-Project\LLM-APP-WEB-SEARCH
+4. Create a Virtual Environment Using Python 3.11
+py -3.11 -m venv .venv
+
+This creates a project-specific environment.
+
+5. Activate the Environment
+.venv\Scripts\activate
+
+Your terminal should now show:
+
+(.venv)
+
+Verify Python version inside the environment:
+
+python --version
+
+Expected:
+
+Python 3.11.9
+6. Upgrade Pip
+python -m pip install --upgrade pip setuptools wheel
+7. Install Your Project Dependencies
+
+Run:
+
+pip install -r requirements.txt
+
+Now packages like:
+
+numpy
+
+streamlit
+
+chromadb
+
+crawl4ai
+
+should install without compilation errors.
+
+##Fixing the IP block or rate limiting problem 
+By self-hosting SearXNG locally with Docker
+
+Step 1 — Run SearXNG locally via Docker
+Open your terminal and run:
+bashdocker run -d \
+  --name searxng \
+  -p 8080:8080 \
+  -e SEARXNG_SECRET_KEY="your-random-secret-key-here" \
+  searxng/searxng:latest
+On Windows (CMD):
+cmddocker run -d --name searxng -p 8080:8080 -e SEARXNG_SECRET_KEY="mysecretkey123" searxng/searxng:latest
+Then verify it's running:
+bashdocker ps
+# You should see searxng running on 0.0.0.0:8080
+Test it in your browser: http://localhost:8080
+
+Step 2 — Enable JSON format (required for API calls)
+By default SearXNG disables the JSON format for API use. Fix it:
+bash# Copy the default config out of the container
+docker exec searxng cat /etc/searxng/settings.yml > settings.yml
+Open settings.yml, find the search: section and update:
+yamlsearch:
+  formats:
+    - html
+    - json        # ← add this line
+Then restart with the fixed config:
+bashdocker run -d \
+  --name searxng \
+  -p 8080:8080 \
+  -v "%cd%/settings.yml:/etc/searxng/settings.yml" \
+  -e SEARXNG_SECRET_KEY="mysecretkey123" \
+  searxng/searxng:latest
+
+Step 3 — Update your code to use localhost
+Only one line changes in your existing code:
+python# ❌ Before — unreliable public instances
+SEARXNG_INSTANCES = [
+    "https://searx.be",
+    "https://search.bus-hit.me",
+    "https://searxng.world",
+    "https://searx.tiekoetter.com",
+]
+
+# ✅ After — your own local instance, always available
+SEARXNG_INSTANCES = [
+    "http://localhost:8080",        # primary — local Docker
+    "https://searx.tiekoetter.com", # fallback — if Docker is down
+    "https://searxng.world",        # fallback 2
+]
+Everything else in your get_web_urls function stays exactly the same.
+
+Step 4 — Manage the container
+bash# Stop SearXNG
+docker stop searxng
+
+# Start it again
+docker start searxng
+
+# View logs if something breaks
+docker logs searxng
+
+# Remove and recreate
+docker rm -f searxng
+
+Quick verification test
+Run this in Python before testing your full app:
+pythonimport requests
+
+response = requests.get(
+    "http://localhost:8080/search",
+    params={"q": "python web scraping", "format": "json"},
+    headers={"Accept": "application/json"}
+)
+
+print(response.status_code)           # should be 200
+print(len(response.json()["results"])) # should be > 0
+
+Why this solves everything
+ProblemPublic InstancesLocal Docker403 ForbiddenCommonNeverConnection errorFrequentNeverRate limiting 429FrequentNeverUptime~60–80%100% (your machine)Speed1–5s<200msCostFreeFree
+Once Docker is running, you'll never hit rate limits again since you're querying your own instance. Let me know if you hit any issues with the Docker setup!
+
+
+##If docker corrupted then:
+The settings.yml file got corrupted by the sed/echo command. Let's fix it cleanly.
+
+Fix — Reset and edit settings.yml properly
+Step 1 — Remove the broken container
+cmddocker rm -f searxng
+Step 2 — Start a fresh container
+cmddocker run -d --name searxng -p 8080:8080 -e SEARXNG_SECRET_KEY="mysecretkey123" searxng/searxng:latest
+Step 3 — Copy the settings file OUT of the container to your project folder
+cmddocker cp searxng:/etc/searxng/settings.yml settings.yml
+Step 4 — Open settings.yml in VS Code
+cmdcode settings.yml
+Step 5 — Find this section (use Ctrl+F to search for formats)
+It will look like this:
+yamlsearch:
+  # Filter content
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+Change it to:
+yamlsearch:
+  # Filter content
+  safe_search: 0
+  autocomplete: ""
+  formats:
+    - html
+    - json
+Step 6 — Copy the fixed file back and restart
+cmddocker cp settings.yml searxng:/etc/searxng/settings.yml
+docker restart searxng
+Step 7 — Verify
+cmdcurl "http://localhost:8080/search?q=python&format=json"
+Or in Python:
+pythonimport requests
+res = requests.get("http://localhost:8080/search",
+                   params={"q": "test", "format": "json"})
+print(res.status_code)  # 200 ✅
+
+------
+Docker run command (secure version)
+Never hardcode the secret in the command. Use an .env file instead:
+Create .env file in your project folder:
+envSEARXNG_SECRET_KEY=PASTE_YOUR_GENERATED_KEY_HERE
+Add .env to .gitignore immediately:
+cmdecho .env >> .gitignore
+Run Docker using the .env file:
+cmddocker run -d ^
+  --name searxng ^
+  -p 127.0.0.1:8080:8080 ^
+  --env-file .env ^
+  searxng/searxng:latest
+
+Key fix: -p 127.0.0.1:8080:8080 instead of -p 8080:8080 — binds the port to localhost only at the Docker level too.
+
+
+Change 6 — Copy back and restart
+cmddocker cp settings.yml searxng:/etc/searxng/settings.yml
+docker restart searxng
+```
+
+---
+
+## Security checklist before submission
+```
+✅ secret_key is a 64-char random hex string
+✅ bind_address is 127.0.0.1 (not 0.0.0.0)
+✅ Docker port bound to 127.0.0.1:8080 (not 0.0.0.0)
+✅ limiter: true (rate limiting on)
+✅ safe_search: 1 (content filtering on)
+✅ .env file created and added to .gitignore
+✅ No secrets hardcoded anywhere in app.py or settings.yml
+
+-----
+Create the file locally then copy it into the container
+Step 1 — Create limiter.toml in your project folder
+Open Notepad or VS Code and create a new file called limiter.toml with this content:
+toml[botdetection.ip_limit]
+link_token = true
+
+[botdetection.ip_lists]
+block_ip = []
+pass_ip = [
+  "127.0.0.1",
+  "::1"
+]
+Save it in the same folder where your settings.yml and app.py are.
+
+Step 2 — Copy it into the container
+cmddocker cp limiter.toml searxng:/etc/searxng/limiter.toml
+Step 3 — Restart
+cmddocker restart searxng
+Step 4 — Verify warning is gone
+cmddocker logs searxng --tail 10
+You should now see Started worker-1 with no limiter.toml warning. Your setup is complete.
+-----------------------------------------
+Run this final test to confirm everything is working end to end
+pythonimport requests
+
+res = requests.get(
+    "http://localhost:8080/search",
+    params={
+        "q":       "python web scraping",
+        "format":  "json",
+        "engines": "bing,duckduckgo,brave,startpage"
+    },
+    headers={"Accept": "application/json"}
+)
+
+print("Status :", res.status_code)
+print("Results:", len(res.json()["results"]))
+print("First  :", res.json()["results"][0]["url"])
+```
+
+Expected output:
+```
+Status : 200
+Results: 10
+First  : https://some-valid-url.com
+Your SearXNG setup is complete and ready to use with crawl4ai. You can now run your app.py.
+
+--------------------------------------
+
+

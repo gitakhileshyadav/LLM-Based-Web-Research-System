@@ -4,8 +4,15 @@ os.environ["CHROMA_TELEMETRY"]     = "false"
 os.environ["POSTHOG_DISABLED"]     = "true"
 os.environ["POSTHOG_API_KEY"]      = ""
 
-import asyncio          #2.  stdlib import
 import sys
+
+# Ensure the project root is importable so package imports like
+# "from app.crawler import ..." work no matter where streamlit is invoked from.
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, _PROJECT_ROOT)
+
+import asyncio          #2.  stdlib import
 
 import streamlit as st                           # 3. streamlit import
 
@@ -23,16 +30,16 @@ if sys.platform == "win32":
 
 # ── Local modules ─────────────────────────────────────────────────────────────
 
-from crawler import crawl_webpages, curate_urls, detect_query_type
-from llm import (
+from app.crawler import crawl_webpages, curate_urls, detect_query_type
+from app.llm import (
     _answer_directly,
     expand_query,
     generate_dimension_answer,
     synthesize_final_report,
 )
-from robots import check_robots_txt
-from search import async_multi_search
-from vectordb import add_to_vector_database, get_vector_collections, reset_collection
+from app.robots import check_robots_txt
+from app.search import async_multi_search
+from app.vectordb import add_to_vector_database, get_vector_collections, reset_collection
 
 
 # ── Streamlit UI ──────────────────────────────────────────────────────────────

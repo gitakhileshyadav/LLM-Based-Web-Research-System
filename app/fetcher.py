@@ -36,7 +36,7 @@ try:
 except ImportError:
     _HAS_TRAFILATURA = False
 
-from config import CRAWLER_USER_AGENT
+from app.config import CRAWLER_USER_AGENT
 
 # Hard cap on fetch time. We’re a fallback, not the primary path; if the
 # server hasn't even sent the body in 10s we give up and return None so the

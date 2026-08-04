@@ -1,0 +1,371 @@
+Crawl4AI — Crawling, Scraping, and How Anti-Bot Blocks Are Defeated
+===================================================================
+
+This guide explains the core structure of the crawling/scraping process in
+this project, how it is implemented, and every measure taken to avoid being
+blocked by websites that try to prevent scraping and crawling.
+
+The short answers:
+  - crawl4ai is the page-fetcher. It downloads and parses the actual web
+    pages. It does NOT talk to the SearXNG container — SearXNG only supplies
+    the URLs to visit.
+  - A page goes through 3 stages: headless-browser fetch -> markdown
+    generation (noise removal) -> BM25 relevance filtering.
+  - Two crawl modes exist: fast "standard" and slow "JS-heavy" for
+    JavaScript-rendered news/media sites.
+  - Anti-blocking is handled at MANY layers: realistic user-agent + headers,
+    human-like pacing, engine rotation, backoff + retries, cooldowns on
+    CAPTCHA/429/403, and safe fallbacks that do not look bot-like.
+
+
+1. Big Picture — Where crawl4ai Sits in the Pipeline
+----------------------------------------------------
+
+The full web-search pipeline (from app/main.py):
+
+  prompt (user)
+    -> expand_query()            Ollama generates 4 research dimensions
+    -> search_queries            [original topic] + LLM dimensions
+    -> async_multi_search()      SearXNG container returns URLs (search layer)
+    -> curate_urls()             pre-crawl filter (drop junk URLs)
+    -> check_robots_txt()        respect robots.txt
+    -> crawl_webpages()          CRAWL4AI fetches + scrapes each page  <-- HERE
+    -> fallback_fetch()          httpx+trafilatura+BS4 rescue for empty pages
+    -> add_to_vector_database()  ChromaDB chunk + embed + store
+    -> synthesize_final_report() LLM builds the answer from stored chunks
+
+CRITICAL CLARIFICATION — crawl4ai does NOT talk to the SearXNG container
+  - SearXNG (in Docker) answers search queries and returns a list of URLs.
+  - crawl4ai then opens each URL DIRECTLY from the internet using a headless
+    Chromium browser (Playwright). It never goes through SearXNG, and it
+    never talks to the Docker container.
+  - The only "container" crawl4ai runs inside is the app container in the
+    Docker deployment (docker/Dockerfile). In development it runs directly on
+    your machine. Either way, its network path to websites is direct.
+
+WHERE THE CODE RUNS:
+  - Dev mode:  crawl4ai + Playwright Chromium installed on your machine
+               (`playwright install chromium`).
+  - Docker:    docker/Dockerfile step 7 runs
+               `playwright install chromium --with-deps` inside the image,
+               so crawl4ai + the browser live in the app container.
+
+
+2. How Crawling & Scraping Works — the 3-Stage Content Pipeline
+---------------------------------------------------------------
+
+For every URL, crawl_webpages() (app/crawler.py) does this:
+
+  STAGE 1 — BROWSER FETCH
+    AsyncWebCrawler opens a headless Chromium, navigates to the URL, waits
+    for the page, and downloads the raw HTML + rendered DOM.
+    - Standard sites: text_mode=True + light_mode=True (fast, no images).
+    - JS-heavy sites: full browser render with scroll simulation so
+      lazy-loaded content appears before scraping.
+
+  STAGE 2 — MARKDOWN GENERATION (noise removal)
+    DefaultMarkdownGenerator converts the HTML into clean markdown, using:
+      excluded_tags = nav, footer, header, form, img, script, style, aside,
+                      iframe, noscript, figure, figcaption, button, input,
+                      select
+      excluded_selectors = [class*='ad'], [class*='cookie'], [class*='popup'],
+                      [class*='modal'], [class*='newsletter'], [class*='social'],
+                      [class*='related'], [class*='sidebar'], [class*='widget'],
+                      [id*='google_ads'], [id*='taboola'], [id*='outbrain'],
+                      and ~20 more ad/tracker/promo patterns.
+      options: ignore_links=True, ignore_images=True, body_width=0,
+               skip_internal_links=True, mark_code=True
+    Net effect: menus, ads, cookie banners, sidebars, and trackers are gone;
+    only the article body survives.
+
+  STAGE 3 — BM25 RELEVANCE FILTER
+    BM25ContentFilter(user_query=prompt, bm25_threshold=1.5, language="english")
+    scores each sentence against the user's prompt using BM25 (the same
+    ranking math as search engines). Sentences scoring >= 1.5 are kept and
+    stored in the result's `fit_markdown` field; the rest are dropped.
+    This is what makes the stored content match the user's question.
+
+  OUTPUT — CrawlResult
+    crawl4ai returns a pydantic model (crawl4ai.models.CrawlResult) with:
+      url, html, success, markdown (unfiltered), fit_markdown (BM25-filtered),
+      metadata. Downstream code reads `fit_markdown` first (see §6).
+
+
+3. Dual-Mode Crawling — Standard vs JS-Heavy
+--------------------------------------------
+
+Not all websites are equal. News and media sites render content with
+JavaScript, so they need a slower, fuller browser session.
+
+  is_js_heavy(url) checks the host against JS_HEAVY_DOMAINS in app/config.py
+  (theguardian.com, cnn.com, reuters.com, bbc.com, nytimes.com, timesofindia,
+  ndtv.com, medium.com, forbes.com, bloomberg.com, etc.).
+
+  STANDARD CONFIG (fast, static pages)
+    CrawlerRunConfig:
+      only_text=True, word_count_threshold=50
+      page_timeout=20000ms (20s), delay_before_return_html=2.0s
+      cache_mode=CacheMode.ENABLED
+    BrowserConfig:
+      headless=True, chromium, text_mode=True, light_mode=True (no images,
+      no extra features -> fast + small memory footprint).
+
+  JS-HEAVY CONFIG (slow, JavaScript-rendered pages)
+    CrawlerRunConfig:
+      only_text=False (full render is required for JS)
+      word_count_threshold=30 (news articles are short)
+      page_timeout=45000ms (45s), delay_before_return_html=5.0s
+      wait_for="css:article,main,p"   (wait until content elements exist)
+      js_code=[ scroll to mid-page, wait 1.5s, scroll to bottom, wait 1s ]
+        -> this scroll simulation triggers lazy-loaded content so it exists
+           in the DOM before scraping.
+    BrowserConfig:
+      headless=True, chromium, text_mode=False, light_mode=False (full render)
+      headers = Accept-Language en-US, DNT 1, etc.
+
+  Both modes share the same markdown generator, excluded tags/selectors, and
+  BM25 filter, so the output is identical in shape.
+
+  WHY SERIAL, NOT PARALLEL (arun_many)
+    Crawls run ONE URL AT A TIME via `crawler.arun(url, config)`:
+      - crawl4ai 0.4.248's arun_many() silently skips the BM25 content
+        filter, so every result comes back with EMPTY fit_markdown. Serial
+        arun() applies the filter correctly.
+      - JS-heavy sites each spin up a full Chromium (~150 MB); running them
+        in parallel would balloon memory. Serial keeps it bounded.
+
+
+4. Implementation in the Project — Step by Step
+-----------------------------------------------
+
+crawl_webpages(urls, prompt) in app/crawler.py:
+
+  Step 1  detect_query_type(prompt)  -> "science" | "news" | "general"
+          (counts SCIENCE_KEYWORDS / NEWS_KEYWORDS in the prompt)
+  Step 2  prioritize_urls(urls, query_type)
+          reputed sources first: arxiv/huggingface for science, reuters/bbc
+          for news, wikipedia/britannica for general.
+  Step 3  Build BM25ContentFilter(user_query=prompt, threshold=1.5).
+  Step 4  Build DefaultMarkdownGenerator with the filter + noise exclusions.
+  Step 5  Build standard CrawlerRunConfig (fast).
+  Step 6  Build JS-heavy CrawlerRunConfig (full render + scroll).
+  Step 7  Build the two BrowserConfigs (light + full).
+  Step 8  Split URLs: standard_urls vs js_urls.
+  Step 9  Crawl standard URLs serially (priority first):
+            async with AsyncWebCrawler(config=standard_browser) as crawler:
+                for url in all_standard:
+                    result = await crawler.arun(url, config=standard_config)
+                    fixed  = await _maybe_retry_and_fallback(crawler, result,
+                                                             standard_config,
+                                                             prompt)
+  Step 10 Crawl JS-heavy URLs serially with the JS browser/config.
+  Step 11 Return all_results (list[CrawlResult]).
+
+  Each crawl is wrapped in try/except so one bad URL can never crash the
+  whole crawl (result is set to None on failure and handled downstream).
+
+RETRY + FALLBACK (the safety net):
+  _maybe_retry_and_fallback() (crawler.py):
+    - If the result has fewer than _FALLBACK_MIN_CHARS (200) characters, it
+      retries the URL once with the same config.
+    - If still short, it hands off to fetcher.fallback_fetch() (see §5) and
+      wraps the recovered text in a valid CrawlResult via
+      _make_fallback_result(). That wrapper sets both `markdown` and
+      `fit_markdown` so downstream code keeps working without special cases.
+    - CrawlResult is a pydantic model with REQUIRED `html` and `success`
+      fields; _make_fallback_result() supplies safe defaults (html="",
+      success=True, metadata={}) to avoid a ValidationError that would crash
+      the whole crawl.
+
+  _content_len() prefers fit_markdown, then falls back to markdown, so the
+  char-count check reflects real content.
+
+
+5. Fallback Scraper (app/fetcher.py) — When the Browser Fails
+-------------------------------------------------------------
+
+When crawl4ai returns empty/errored content (common for JS-heavy news,
+paywalled pages, or sites that fingerprint headless Chromium), the fallback
+layer rescues the URL with a much cheaper extraction:
+
+  1. httpx GET with a REAL-BROWSER User-Agent (no JS execution, ~1-3s).
+     - timeout 10s, follows up to 5 redirects, TLS verify ON (SSRF-safe).
+  2. trafilatura.extract(html, favor_precision=True) — purpose-built main-
+     article extractor; discards nav/ads/sidebars and returns a clean text
+     blob, even from pages BM25 rejected.
+  3. If trafilatura finds nothing, BeautifulSoup scrapes <article>/<main>/<p>
+     tags, keeping only paragraphs >= 80 chars to drop menu labels.
+  4. Returns plain text (>= 80 chars) or None.
+
+  Event-loop safety: httpx runs in asyncio.to_thread(); if the loop is
+  shutting down (Streamlit teardown) it falls back to a direct blocking call
+  instead of raising "cannot schedule new futures after shutdown".
+
+
+6. After the Crawl — What Happens to the Content
+------------------------------------------------
+
+add_to_vector_database() (app/vectordb.py) picks content from each CrawlResult
+in this order:
+
+  1. fit_markdown  (BM25-filtered) if it has > 100 chars  <-- preferred
+  2. markdown      (unfiltered) if > 100 chars
+  3. html          (raw) as a last resort
+  4. else skip the URL
+
+  The chosen text is cleaned (clean_markdown_content strips leftover URLs,
+  markdown image tags, etc.), then split by RecursiveCharacterTextSplitter
+  into chunks of CHUNK_SIZE=500 chars with CHUNK_OVERLAP=80, capped at
+  MAX_CHUNKS_PER_URL=20. Each chunk is embedded with nomic-embed-text
+  (Ollama) and upserted into ChromaDB with metadata (source URL, session_id,
+  chunk_index, query, crawled_at). Stale chunks for the same URL are cleared
+  before re-insertion.
+
+
+7. Configuration Reference (all crawl-related constants)
+--------------------------------------------------------
+
+  app/config.py
+    CRAWLER_USER_AGENT        real Chrome UA string (see §8.1)
+    HEADERS                   User-Agent, Accept: application/json,
+                              Accept-Language en-US
+    BM25_THRESHOLD = 1.5      sentence relevance cutoff for fit_markdown
+    JS_HEAVY_DOMAINS          news/media hosts that need full render
+    SCIENTIFIC_DOMAINS        arxiv, huggingface, nature, pubmed, ...
+    NEWS_DOMAINS              reuters, bbc, apnews, aljazeera, ...
+    NEWS_KEYWORDS             "latest", "today", "breaking", "2026", ...
+    SCIENCE_KEYWORDS          "research", "paper", "model", "algorithm", ...
+    CURATION_LENIENT_MAX_URLS = 6
+    MAX_URLS_PER_DOMAIN = 3
+    MAX_CRAWL_URLS = 12
+    CHUNK_SIZE = 500, CHUNK_OVERLAP = 80, MAX_CHUNKS_PER_URL = 20
+
+  app/crawler.py
+    _FALLBACK_MIN_CHARS = 200 (below this -> retry, then fallback_fetch)
+
+  app/fetcher.py
+    _FETCH_TIMEOUT = 10.0s, _MAX_REDIRECTS = 5, _MIN_PARA_LEN = 80
+
+  requirements.txt
+    Crawl4AI==0.4.248, httpx==0.27.2, trafilatura==1.12.2,
+    beautifulsoup4==4.12.3
+
+  docker/Dockerfile
+    RUN playwright install chromium --with-deps  (browser inside the image)
+
+
+8. How We Prevent IP Blocks and Other Anti-Bot Security Measures
+----------------------------------------------------------------
+
+Websites defend against scraping with: IP rate-limiting, CAPTCHAs (Cloudflare,
+reCAPTCHA), HTTP 429/403, browser fingerprinting, and blocking headless
+browser signatures. This project defends against ALL of these at multiple
+layers. No single trick fixes everything — the combination does.
+
+8.1 LOOK LIKE A REAL BROWSER (defeats naive fingerprinting)
+  - CRAWLER_USER_AGENT is a genuine Chrome 122 desktop UA:
+      Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36
+      (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36
+  - Headers mimic a browser: Accept, Accept-Language: en-US,en;q=0.9,
+    DNT: 1.
+  - crawl4ai drives real Chromium (via Playwright), not a raw HTTP client, so
+    the JS-heavy mode executes like a human's browser would.
+  - text_mode/light_mode reduce the fingerprint surface for standard sites.
+
+8.2 BE POLITE — SLOW, LOW-CONCURRENCY PACING (avoids rate-limit flags)
+  - Serial arun() means only ONE page is fetched at a time (no burst).
+  - delay_before_return_html: 2.0s (standard) / 5.0s (JS-heavy) — a natural
+    pause per page instead of hammering a site.
+  - Multi-search fan-out is bounded to 3 concurrent SearXNG queries
+    (Semaphore(3) in search.py) with per-task jitter of 0.2-0.8s so
+    requests do not arrive at the same millisecond.
+  - SearXNG's outgoing settings (searxng_config/settings.yml):
+      request_timeout: 12.0  (was 3.0 — too aggressive, looked bot-like)
+      pool_connections: 10, pool_maxsize: 10  (low = less bot-like)
+      enable_http2: true (real browsers use HTTP/2)
+
+8.3 SPREAD LOAD ACROSS ENGINES (avoids tripping a single provider)
+  - SearXNG aggregates many upstream engines; the app rotates ENGINE_SETS
+    per sub-query (bing+ddg, bing+mwmbl+brave, bing+ddg+brave), so one
+    upstream outage only hits 1/N dimensions.
+  - SearXNG is self-hosted locally (localhost:8080), which avoids the
+    block-prone shared IPs of public instances.
+
+8.4 RESPECT COOLDOWNS ON 429 / CAPTCHA / 403 (don't hammer a blocked engine)
+  - searxng_config/settings.yml search.suspended_times gives every error
+    class a cooldown before SearXNG will touch that engine again:
+      Access denied / HTTP 403 : 120s
+      CAPTCHA                  : 300s
+      Too many requests (429)  : 120s
+      Cloudflare CAPTCHA       : 600s (10 min)
+      Cloudflare access denied : 300s
+      reCAPTCHA                : 1800s (30 min)
+    Result: a blocked engine is left alone, and other engines keep answering.
+
+8.5 RETRY WITH BACKOFF, THEN A GENERIC FALLBACK (absorbs transient blocks)
+  - get_web_urls() tries: every engine set on the local instance -> every set
+    on fallback instances -> waits 2-4s -> second pass -> final "generic"
+    query with no engines restriction so SearXNG uses whatever is not
+    currently suspended.
+  - async_multi_search() retries ONLY the dimensions that came back empty,
+    with a DIFFERENT engine set and jitter, so one transient block doesn't
+    wipe out a whole dimension.
+
+8.6 ROBOTS.TXT COMPLIANCE (be a good crawler, avoid bans)
+  - check_robots_txt() (app/robots.py) fetches each site's robots.txt and
+    uses urllib.robotparser to test every URL against our exact
+    CRAWLER_USER_AGENT (then "*"). URLs the site disallows are dropped before
+    any fetch. Respecting robots.txt is a strong anti-ban signal.
+
+8.7 DON'T SCRAPE WHAT WOULD WASTE A CRAWL SLOT (fewer requests = less risk)
+  - DISCARD_DOMAINS (youtube, reddit, quora, facebook, instagram, twitter)
+    are filtered out post-hoc — these either have login walls or are likely
+    to block crawlers.
+  - _DEFINITION_TITLE_RE drops dictionary/definition pages.
+  - curate_urls() removes junk URLs BEFORE crawling (root homepages,
+    single-token matches, domain dupes, and caps the pool at
+    MAX_CRAWL_URLS=12). Fewer, better-targeted requests = lower block risk.
+
+8.8 SSRF & SECURITY PROTECTION ON THE SEARCH SIDE (protects YOUR machine)
+  - BLOCKED_HOSTS (localhost, 127.*, 192.168.*, 10.*, 172.16-31.*, 0.0.0.0,
+    ::1, metadata.google.internal) block attempts to make SearXNG hit
+    internal/private addresses.
+  - ALLOWED_SCHEMES whitelist (http/https only).
+  - sanitize_query() strips control/injection characters and caps queries.
+  - The fallback fetcher always uses TLS verify=True.
+
+8.9 SEARCH-SIDE DEFENSE IN SEARXNG CONFIG (the container side)
+  - searxng_config/limiter.toml keeps a pass-list for local/docker-bridge IPs
+    so the app itself is never throttled (currently inactive because the
+    app talks to localhost directly — see searxng_docker_guide.txt).
+  - SEARXNG_SECRET signs session data; SEARXNG_LIMITER=false avoids the
+    "no reverse-proxy IP" false-positive lockout.
+
+8.10 WHAT THIS DOES NOT DO (honest limits)
+  - A no-proxy residential IP can still be CAPTCHA'd by DDG or 429'd by
+    brave. We cannot prevent that — we absorb it with rotation + cooldowns +
+    retries so a block degrades one dimension instead of killing the search.
+  - Headless Chromium can still be fingerprinted by sites using advanced
+    bot-detection (some finance/cloudflare-hardened sites). When that
+    happens, the fallback fetcher (§5) still rescues the URL with plain HTTP.
+  - We deliberately do NOT: rotate IPs through proxies, spoof TLS
+    fingerprints, or bypass CAPTCHAs. Those cross ethical/legal lines and
+    are not needed for a research tool.
+
+
+9. Summary — Why This Design Is Stable
+--------------------------------------
+
+  - crawl4ai does one job (fetch+scrape pages) and is separated from search
+    (SearXNG), so a block in one layer never cascades into the other.
+  - Noise removal (Stage 2) + BM25 filtering (Stage 3) produce clean,
+    query-relevant text for RAG before it ever reaches the vector DB.
+  - Two crawl modes handle both static and JS-rendered pages, and a three-
+    layer fallback (retry -> trafilatura -> BS4) rescues almost any page.
+  - Anti-blocking is layered: realistic UA/headers, polite pacing, engine
+    rotation, error cooldowns, backoff+retry, robots.txt compliance, and
+    pre-crawl curation. Individually each is weak; together they keep a
+    no-proxy IP working day after day.
+
+----------------------------------------------------------------------
+END OF GUIDE

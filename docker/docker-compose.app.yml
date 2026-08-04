@@ -1,0 +1,71 @@
+# Full stack: SearXNG + Redis + the LLM Web Search app.
+#
+# Build the app image first (from the project root):
+#   docker build -t yourusername/llm-web-search-app:1.0 -f docker/Dockerfile .
+#
+# Then start everything:
+#   docker compose -f docker/docker-compose.app.yml up -d
+#
+# Open the app at: http://localhost:8501
+
+services:
+  searxng-redis:
+    image: redis:8-alpine
+    container_name: searxng-redis
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - searxng-redis-data:/data
+    networks:
+      - searxng-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:2026.8.1-8892414dc
+    container_name: searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      - ../searxng_config:/etc/searxng:rw
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+      - SEARXNG_SECRET=mysecretkey123
+      - SEARXNG_LIMITER=false
+    depends_on:
+      searxng-redis:
+        condition: service_healthy
+    networks:
+      - searxng-net
+    restart: unless-stopped
+
+  app:
+    image: yourusername/llm-web-search-app:1.0
+    container_name: llm-web-search-app
+    ports:
+      - "8501:8501"
+    volumes:
+      # Keep the vector database safe even if the container is replaced.
+      # CHROMA_DIR_PATH resolves to /app/web-search-llm-db inside the image.
+      - web-search-db:/app/web-search-llm-db
+    environment:
+      # Windows/macOS: use host.docker.internal to reach Ollama running on
+      # your computer. On Linux use 172.17.0.1 instead.
+      - OLLAMA_BASE_URL=http://host.docker.internal:11434
+    depends_on:
+      - searxng
+    networks:
+      - searxng-net
+    restart: unless-stopped
+
+networks:
+  searxng-net:
+    driver: bridge
+
+volumes:
+  searxng-redis-data:
+  web-search-db:

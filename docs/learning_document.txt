@@ -1,0 +1,923 @@
+##Why DuckDuckGo Blocks or Rate-Limits IPs
+
+Even though DuckDuckGo is privacy-focused, it still enforces abuse prevention. If your usage resembles automated scraping, it will throttle or block.
+
+1) Primary Reasons
+A. High Request Rate
+Too many queries in a short time
+
+Example:
+
+50–100 requests/min → flagged
+
+Why: Protects infrastructure from bots and overload.
+
+B. Repetitive / Patterned Queries
+Same or similar queries repeatedly
+No variation in:
+keywords
+headers
+
+Signal: “This is a script, not a human”
+
+C. Missing / Suspicious Headers
+
+If your request lacks:
+
+User-Agent
+Proper browser-like headers
+
+It looks like:
+
+Python script → bot → block
+D. No Cookies / Session Behavior
+
+Real users:
+
+Maintain sessions
+Have cookies
+
+Bots:
+
+Stateless requests
+
+→ easier to detect
+
+E. IP Reputation
+
+If your IP:
+
+Comes from cloud (AWS, VPS)
+Shared by many users
+
+→ more likely to be flagged
+
+F. HTML Scraping Endpoint Abuse
+
+Using:
+
+https://html.duckduckgo.com/html/
+
+Too aggressively:
+
+triggers CAPTCHA
+returns empty or partial results
+G. No Delay Between Requests
+
+Example:
+
+Request → immediate next request → immediate next
+
+→ unnatural behavior
+
+2) What Rate Limiting Looks Like
+Empty results
+HTTP errors (202, 429)
+CAPTCHA pages
+Inconsistent responses
+3) How to Avoid It (Engineering Fixes)
+A. Add Delay (Most Important)
+import time
+time.sleep(2)  # 1–3 sec delay
+B. Rotate Headers
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+}
+C. Limit Request Rate
+Safe Range	Recommendation
+Requests/sec	≤ 0.5
+Requests/min	20–30 max
+D. Use Session
+import requests
+
+session = requests.Session()
+session.get(url)
+E. Query Diversification
+
+Instead of:
+
+AI healthcare
+AI healthcare
+AI healthcare
+
+Use:
+
+AI in medical diagnosis
+machine learning healthcare applications
+AI hospital automation
+F. Caching Results
+
+Avoid repeating:
+
+Same query → same request
+
+Store results locally.
+
+G. Use SearXNG Instead
+
+Better approach:
+
+SearXNG acts as a buffer layer
+Handles rate limiting better
+Can distribute load across engines
+4) Advanced (If Scaling)
+A. Proxy Rotation
+Rotate IPs (residential proxies preferred)
+B. Distributed Workers
+Spread requests across multiple machines
+C. Backoff Strategy
+if rate_limited:
+    sleep(10)
+5) Key Insight
+
+Rate limiting is not random — it’s triggered by non-human request patterns.
+
+6) For Your Use Case (Deep Research Agent)
+
+Best practice:
+
+1. Use SearXNG as primary layer
+2. Add 1–2 sec delay
+3. Cache everything
+4. Limit concurrency
+
+-----------------------------------------------
+Why Rate Limiting Exists (General Reason)
+
+Rate limiting is a control mechanism used by services (like DuckDuckGo or APIs) to restrict how many requests a client can make in a given time.
+
+1) Core Reasons
+A. Prevent System Overload
+Servers have finite CPU, memory, bandwidth
+Too many requests → service slowdown or crash
+Without rate limiting:
+Few users/scripts can degrade service for everyone
+B. Stop Abuse / Bots
+Automated scripts can send thousands of requests
+Used for:
+scraping at scale
+spam
+data harvesting
+
+Rate limiting helps distinguish:
+
+Human behavior vs bot behavior
+C. Fair Usage (Resource Sharing)
+
+Ensures:
+
+No single user consumes disproportionate resources
+All users get reasonable access
+D. Protect Against Attacks
+Example:
+DDoS (Distributed Denial of Service)
+Millions of requests → overwhelm server
+
+Rate limiting acts as a first defense layer
+
+E. Cost Control
+
+For services:
+
+Each request = compute cost
+
+Rate limiting:
+
+prevents excessive free usage
+enforces pricing tiers (in APIs)
+F. Data Protection
+
+Prevents:
+
+Mass scraping of indexed content
+Unauthorized bulk extraction
+2) How Systems Detect You (Why You Get Limited)
+
+Rate limiting is triggered by patterns like:
+
+High request frequency
+No delay between calls
+Repeated queries
+Same IP sending many requests
+Non-browser behavior (missing headers)
+3) Types of Rate Limiting
+A. Fixed Window
+100 requests per minute
+B. Sliding Window
+More flexible tracking over time
+C. Token Bucket (Common)
+You get tokens over time → each request consumes one
+4) What Happens When You Hit the Limit
+HTTP 429 (Too Many Requests)
+Temporary IP block
+CAPTCHA challenge
+Empty or partial responses
+5) Real-World Example
+
+If your script does:
+
+Loop:
+  search → instant next search → repeat 100 times
+
+System interprets:
+
+Not human → throttle/block
+6) Key Insight
+
+Rate limiting is not about blocking you —
+it’s about maintaining stability, fairness, and security.
+
+7) In Your Context (AI Research Agent)
+
+You hit rate limits because:
+
+High-frequency automated queries
+Parallel requests
+No human-like behavior pattern
+Practical Rule
+Human-like = safe
+Machine-like (fast, repetitive) = limited
+
+HTTP 202 RateLimit — What It Means
+
+When you see 202 from DuckDuckGo (especially via HTML endpoint or libraries), it typically indicates:
+
+Request accepted but not processed normally due to rate limiting / bot suspicion
+
+1) Why 202 Happens (in Your Case)
+
+DuckDuckGo uses 202 (instead of 429) in some endpoints to:
+
+Soft-block automated traffic
+Avoid exposing exact rate-limit behavior
+Return a “non-final” or degraded response
+2) Common Triggers
+A. Too Many Requests Quickly
+Loop → 0 delay → multiple queries
+B. Library-Based Access
+
+Using:
+
+duckduckgo_search
+direct HTML endpoint
+
+→ more likely flagged than browser traffic
+
+C. No Real Browser Signature
+
+Missing:
+
+Proper headers
+Cookies
+Session continuity
+D. Repeated Pattern Queries
+Same structure → multiple times
+E. Shared / Cloud IP
+VPS, Docker environments
+Already flagged IP ranges
+3) What 202 Response Leads To
+Empty results
+Partial results
+Retry loops (like your earlier log)
+Inconsistent output
+4) Fixes (Directly Applicable)
+A. Add Delay (Mandatory)
+import time
+time.sleep(2)
+B. Use Session + Headers
+import requests
+
+session = requests.Session()
+headers = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+}
+session.get(url, headers=headers)
+C. Limit Concurrency
+
+If using async:
+
+❌ 20 parallel requests
+✅ 3–5 max
+D. Retry with Backoff
+import time
+
+for i in range(3):
+    res = request()
+    if res.status_code == 202:
+        time.sleep(5 * (i+1))
+E. Cache Results
+
+Avoid:
+
+Same query → repeated calls
+F. Switch to Better Source
+
+Use:
+
+SearXNG (you already use it)
+
+Reason:
+
+Acts as buffer
+Handles rate limits better
+5) Recommended Architecture Fix
+Your Agent
+   ↓
+SearXNG (primary)
+   ↓
+Fallback → DuckDuckGo (limited use)
+6) If Still Getting 202 Frequently
+
+Then likely:
+
+IP flagged → restart network / use different IP
+Too aggressive scraping
+Docker network reuse (same IP pattern)
+7) Key Insight
+
+202 is a soft block signal, not a success.
+
+Practical Rule
+If 202 appears → slow down immediately
+
+chrome_116 impersonation — still using a bad impersonation string somewhere in your code
+Persistent rate-limiting on both backends — DuckDuckGo is blocking your IP/session. The fix is to rotate proxies or switch to a different search API entirely.
+
+
+Fix 1 — The impersonation string (find & fix it)
+Search your entire project for where chrome_116 is set:
+bashgrep -r "chrome_116" .
+Then replace it with a valid value. To see all valid strings on your machine right now:
+pythonfrom curl_cffi.requests import BrowserType
+print(list(BrowserType.__members__.keys()))
+Common valid ones as of 2025:
+python# ✅ Pick any one of these
+"chrome99", "chrome100", "chrome101", "chrome104",
+"chrome107", "chrome110", "chrome116",   # underscore → NO underscore
+"safari15_3", "safari15_5", "safari17_0"
+
+Key gotcha: it's "chrome116" not "chrome_116" — no underscore between name and version.
+
+
+Fix 2 — The real problem: DuckDuckGo rate-limiting
+DDG aggressively rate-limits repeated requests from the same IP, especially in dev/testing. Here are your options ranked by reliability:
+Option A — Add a real proxy (most effective)
+pythonfrom duckduckgo_search import DDGS
+
+with DDGS(proxy="socks5://user:pass@proxyhost:port", timeout=20) as ddgs:
+    results = list(ddgs.text(search_term, max_results=5, backend="html"))
+Free proxy sources to test: https://www.socks-proxy.net/ or use a service like Bright Data / Oxylabs for production.
+
+Option B — Switch to SearXNG (free, self-hosted, no rate limits)
+pythonimport requests
+
+def get_web_urls(search_term: str, numresults: int = 5) -> list[str]:
+    """
+    Uses a public SearXNG instance — no API key, no rate limits.
+    Replace the base_url with your own self-hosted instance for production.
+    """
+    base_url = "https://searx.be/search"           # or host your own
+
+    params = {
+        "q": search_term,
+        "format": "json",
+        "engines": "google,bing,duckduckgo",
+        "language": "en"
+    }
+
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                      "AppleWebKit/537.36 (KHTML, like Gecko) "
+                      "Chrome/116.0.0.0 Safari/537.36"
+    }
+
+    try:
+        response = requests.get(base_url, params=params, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
+
+        discard_domains = ["youtube.com", "britannica.com", "vimeo.com"]
+        urls = [
+            r["url"] for r in data.get("results", [])
+            if "url" in r
+            and r["url"].startswith("http")
+            and not any(d in r["url"] for d in discard_domains)
+        ]
+
+        return urls[:3]
+
+    except Exception as e:
+        print(f"[SearXNG] Search failed: {e}")
+        return []
+
+Option C — Use Google Custom Search API (most stable, free tier = 100 calls/day)
+pythonimport requests
+
+GOOGLE_API_KEY = "your_key_here"        # console.cloud.google.com
+GOOGLE_CSE_ID  = "your_cse_id_here"    # programmablesearchengine.google.com
+
+def get_web_urls(search_term: str, numresults: int = 5) -> list[str]:
+    """
+    Google Custom Search — reliable, no IP bans, 100 free queries/day.
+    """
+    url = "https://www.googleapis.com/customsearch/v1"
+
+    discard_domains = ["youtube.com", "britannica.com", "vimeo.com"]
+    exclusions = " ".join(f"-site:{d}" for d in discard_domains)
+
+    params = {
+        "key": GOOGLE_API_KEY,
+        "cx":  GOOGLE_CSE_ID,
+        "q":   f"{search_term} {exclusions}",
+        "num": min(numresults, 10)      # Google caps at 10 per request
+    }
+
+    try:
+        response = requests.get(url, params=params, timeout=10)
+        response.raise_for_status()
+        items = response.json().get("items", [])
+
+        urls = [
+            item["link"] for item in items
+            if "link" in item and item["link"].startswith("http")
+        ]
+
+        return urls[:3]
+
+    except Exception as e:
+        print(f"[Google CSE] Search failed: {e}")
+        return []
+
+Recommendation
+SituationUseLocal dev / testingSearXNG (Option B) — zero setupProduction appGoogle CSE (Option C) — reliable & scalableMust use DDGOption A with rotating proxies
+The rate-limiting you're seeing is DDG actively blocking your dev machine's IP. No amount of retries or backend switching will fix it without either a proxy or switching the search provider.
+
+Full Three-Way Comparison
+FactorA — DDG + ProxyB — SearXNGC — Google CSECostFree (unreliable) / $$$  (paid)FreeFree up to 100/dayReliabilityLow (free) / High (paid)MediumHighSetup effortMediumLow / MediumMediumResult qualityGood (DDG)InconsistentExcellentRate limitsBypassed via proxyNone (self-hosted)100/day freeProduction-readyOnly with paid proxiesOnly if self-hostedYesPrivacyMediumExcellentPoorCode complexityHighLowLowBest for—Dev/testingDemo/production
+
+------------------------------------------------------------
+## searxng
+Running SearXNG on Docker — Avoiding IP Blocks (Local → Production)
+
+SearXNG reduces direct exposure to engines, but you can still get blocked upstream (DuckDuckGo, Bing, etc.). The goal is to behave like distributed, human-like traffic.
+
+1) Core Principle
+
+Your server IP becomes the “user.”
+If it behaves like a bot → it gets rate-limited or banned.
+
+2) Engine Configuration (Most Important)
+A. Don’t Overuse a Single Engine
+
+Avoid:
+
+engines:
+  - duckduckgo
+
+Use multiple:
+
+engines:
+  - duckduckgo
+  - bing
+  - brave
+B. Enable Load Distribution
+Spread queries across engines
+Disable failing engines quickly
+3) Rate Limiting (Inside SearXNG)
+
+Edit settings.yml:
+
+server:
+  limiter: true
+
+redis:
+  url: redis://redis:6379/0
+Why:
+Prevents your own system from overloading external engines
+Enforces request throttling
+4) Add Delays (Critical)
+outgoing:
+  request_timeout: 5.0
+
+And internally:
+
+Add 1–3 sec delay per engine request
+5) Use Proxies (Production-Grade)
+A. Why Needed
+
+Without proxies:
+
+All requests → single IP → high ban risk
+B. Types of Proxies
+Type	Recommendation
+Residential	Best (hard to detect)
+Datacenter	Medium
+Free proxies	Avoid
+C. Configure in SearXNG
+outgoing:
+  proxies:
+    http:
+      - http://proxy1:port
+      - http://proxy2:port
+6) Docker-Level Considerations
+A. Persistent IP Problem
+Docker container uses host IP
+Restarting container ≠ new IP
+Fix:
+Use proxy layer
+Or deploy across multiple servers
+B. Resource Limits
+
+Set limits:
+
+deploy:
+  resources:
+    limits:
+      cpus: "2"
+      memory: 2G
+
+Prevents:
+
+Over-parallel requests
+Accidental flooding
+7) Request Pattern Control
+A. Avoid Burst Traffic
+
+Bad:
+
+100 queries in 2 seconds
+
+Good:
+
+spread over time (queue system)
+B. Use Queue System
+Redis queue
+Worker pulls tasks slowly
+8) Headers & Fingerprinting
+
+Ensure browser-like headers:
+
+outgoing:
+  useragent_suffix: "Mozilla/5.0"
+
+Rotate if needed.
+
+9) Caching (Huge Impact)
+
+Enable caching:
+
+redis:
+  url: redis://redis:6379/0
+Benefit:
+Same query → no repeated external call
+Reduces ban probability significantly
+10) Engine Health Monitoring
+Disable engines returning:
+429
+202
+CAPTCHA
+
+Automate:
+
+If engine fails → temporarily blacklist
+11) Logging & Observability
+
+Track:
+
+Request rate
+Engine failures
+Response codes
+
+Tools:
+
+Prometheus + Grafana (optional)
+12) Production Deployment Strategy
+A. Single Node (Basic)
+SearXNG + Redis
+Limited scale
+B. Scalable Setup
+Load Balancer
+   ↓
+Multiple SearXNG instances
+   ↓
+Proxy Pool
+   ↓
+Search Engines
+13) Anti-Ban Checklist
+ Multiple engines enabled
+ Rate limiter ON
+ Redis caching ON
+ Delay between requests
+ Proxy rotation (production)
+ No burst traffic
+ Engine fallback logic
+14) Common Mistakes
+❌ Only DuckDuckGo enabled
+❌ No delay / async flood
+❌ No caching
+❌ Running from cloud IP without proxy
+❌ Ignoring 202/429 errors
+15) Key Insight
+
+SearXNG doesn’t eliminate blocking — it manages and distributes risk.
+
+Recommended Setup for You
+
+Since you're building a Deep Research Agent:
+
+SearXNG (Docker)
+   + Redis cache
+   + 3–4 engines
+   + 1–2 sec delay
+   + Query queue
+   + (Optional) proxy pool
+
+---------------------------------------------------------------------------------
+limiter in SearXNG — Purpose and Role
+
+The limiter is an internal rate-control mechanism inside SearXNG.
+
+1) What limiter Does
+
+When enabled:
+
+server:
+  limiter: true
+
+It:
+
+Tracks incoming requests (per IP/client)
+Applies rate limits
+Prevents excessive query bursts
+2) Why It Exists
+A. Protect Your Instance
+
+Without limiter:
+
+Your app → sends 100 queries instantly → SearXNG forwards all → engines detect abuse → IP blocked
+
+With limiter:
+
+Your app → sends 100 queries → limiter throttles → engines see normal traffic
+B. Prevent Upstream Blocking
+
+Search engines like:
+
+DuckDuckGo
+Bing
+
+detect:
+
+High frequency requests
+Non-human patterns
+
+Limiter helps make traffic:
+
+slower + controlled + human-like
+C. Fair Usage (Multi-user Systems)
+
+If multiple users hit your instance:
+
+Prevents one user from consuming all bandwidth
+3) How It Works Internally
+Uses IP-based tracking
+Often backed by Redis
+redis:
+  url: redis://redis:6379/0
+Mechanism:
+Count requests per time window
+If exceeded → delay / block
+4) Role in Local Deployment
+Case 1: Local Testing (Single User)
+You can:
+Disable limiter temporarily:
+server:
+  limiter: false
+Why:
+Faster testing
+No artificial throttling
+Case 2: Local + Automated Scripts (Your Case)
+You SHOULD enable it:
+server:
+  limiter: true
+
+Because:
+
+Your research agent sends multiple queries
+Without limiter → high chance of 202 / bans
+Case 3: Production Deployment
+Must be enabled
+
+Reason:
+
+Protects your IP
+Prevents engine bans
+Stabilizes system
+5) What Happens If Disabled
+No control on request rate
+Burst traffic goes directly to engines
+Results:
+HTTP 202 (DuckDuckGo)
+HTTP 429
+CAPTCHA
+Temporary IP bans
+6) What Limiter Does NOT Do
+
+Important:
+
+❌ Does NOT bypass rate limits
+❌ Does NOT hide your IP
+❌ Does NOT replace proxies
+
+It only:
+
+controls how fast you hit external engines
+7) Best Practice Setup
+server:
+  limiter: true
+
+redis:
+  url: redis://redis:6379/0
+
+Combine with:
+
+Query delay (1–2 sec)
+Caching
+Multiple engines
+8) When to Disable
+
+Only disable if:
+
+Manual testing
+Very low request frequency
+9) Key Insight
+
+Limiter is your first line of defense against getting blocked.
+
+Practical Recommendation for You
+
+Since you're building a Deep Research Agent:
+
+Keep limiter: true
+Use Redis
+Add external delay in your code
+If you want next step
+
+I can:
+
+Show exact limiter tuning (requests/sec, burst size)
+Or optimize your settings.yml for your workload
+
+Just share your current config.
+
+but what the limiter is observing and what rules he follow as I need to query large no in small time
+What the limiter Actually Monitors in SearXNG
+
+The limiter is not intelligent AI—it’s a rule-based rate controller. It observes request patterns and enforces limits to prevent abuse.
+
+1) What It Observes
+A. Request Frequency (Primary Signal)
+Number of requests per IP per time window
+Example:
+IP → 30 requests in 10 seconds → flagged
+B. Burst Behavior
+Sudden spikes of requests
+0 → 50 requests instantly → suspicious
+
+Limiter penalizes burst traffic more than steady traffic.
+
+C. Concurrent Requests
+Multiple parallel requests from same client
+10 parallel queries → high risk
+D. Endpoint Usage
+/search endpoint hit repeatedly
+Especially with format=json (used by bots)
+E. (If Redis enabled) Cross-Process Tracking
+Tracks usage across:
+multiple threads
+multiple containers
+2) What Rules It Follows
+
+Limiter typically implements variations of:
+
+A. Fixed Window
+Max X requests per Y seconds
+B. Token Bucket (Most Likely)
+- You get tokens over time
+- Each request consumes 1 token
+- If tokens = 0 → request delayed/blocked
+C. Burst + Sustain Model
+Type	Behavior
+Burst	Allows small spikes
+Sustained	Limits long high usage
+3) Important Clarification
+
+The limiter protects SearXNG and upstream engines, not your use case.
+
+So if you want:
+
+Large number of queries in small time
+
+Limiter will actively slow you down.
+
+4) Why You Still Get Blocked Even With Limiter
+
+Because:
+
+Limiter → controls your app
+BUT
+Search engines → see final outgoing traffic
+
+If total outgoing traffic is still high → IP gets flagged anyway
+
+5) Strategy for Your Requirement
+“Large queries in small time”
+
+You cannot solve this with limiter tuning alone.
+
+You need a system-level approach:
+
+6) Correct Architecture for High Throughput
+A. Queue-Based Throttling
+Incoming 100 queries
+   ↓
+Queue (Redis)
+   ↓
+Workers (controlled rate)
+   ↓
+SearXNG
+B. Parallelism with Limits
+
+Instead of:
+
+100 requests at once ❌
+
+Do:
+
+5 workers × 20 requests over time ✅
+C. Add Delay + Jitter
+import time, random
+time.sleep(random.uniform(1, 3))
+D. Use Multiple Engines
+
+Spread load:
+
+DuckDuckGo
+Bing
+Brave
+E. Use Proxies (Only Real Solution for Scale)
+
+Without proxies:
+
+Single IP → bottleneck
+
+With proxies:
+
+Multiple IPs → distributed load
+7) Should You Disable Limiter?
+Case: High-volume system
+Option 1 (Recommended)
+limiter: true
+
+AND control rate in your code
+
+Option 2 (Advanced)
+limiter: false
+
+ONLY IF:
+
+You implement your own rate control
+You fully manage request scheduling
+8) Practical Limits (Reality)
+
+Without proxies:
+
+Level	Safe Throughput
+Per second	0.3–1 req/sec
+Per minute	20–40
+
+Beyond this → high risk of:
+
+202 responses
+CAPTCHA
+IP block
+9) Key Insight
+
+Limiter is a brake, not an accelerator.
+
+If you want speed:
+
+You must scale horizontally (IPs, engines, caching)
+Not remove safeguards blindly
+10) What You Should Do
+
+Given your project:
+
+1. Keep limiter ON
+2. Build queue system
+3. Limit concurrency (3–5)
+4. Add delay + randomness
+5. Cache aggressively
+6. Add proxy layer (if scaling)
+
+---------------------------------------------------------------------

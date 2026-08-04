@@ -30,7 +30,7 @@ try:
 except ImportError:
     _HAS_BM25 = False
 
-from config import (
+from app.config import (
     ALLOWED_SCHEMES,
     BLOCKED_HOSTS,
     DISCARD_DOMAINS,

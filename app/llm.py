@@ -4,7 +4,7 @@ generation, final report synthesis, direct answers, and health checks."""
 import requests
 import streamlit as st
 
-from config import OLLAMA_BASE_URL, OLLAMA_MODEL, SYSTEM_PROMPTS
+from app.config import OLLAMA_BASE_URL, OLLAMA_MODEL, SYSTEM_PROMPTS
 
 
 # ── Query Expansion ───────────────────────────────────────────────────────────

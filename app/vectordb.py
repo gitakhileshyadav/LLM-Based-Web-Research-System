@@ -21,7 +21,7 @@ from crawl4ai.models import CrawlResult
 from langchain_community.document_loaders import UnstructuredMarkdownLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-from config import (
+from app.config import (
     CHROMA_DIR_PATH,
     CHUNK_OVERLAP,
     CHUNK_SIZE,

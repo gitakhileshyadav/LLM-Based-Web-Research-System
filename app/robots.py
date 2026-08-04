@@ -4,7 +4,7 @@ import urllib.request
 from urllib.parse import urlparse
 from urllib.robotparser import RobotFileParser
 
-from config import CRAWLER_USER_AGENT
+from app.config import CRAWLER_USER_AGENT
 
 
 def check_robots_txt(urls: list[str]) -> list[str]:

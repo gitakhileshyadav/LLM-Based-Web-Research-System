@@ -75,7 +75,7 @@ Thumbs.db
 *.tmp
 *.temp
 
-running_document.txt
+# -------------------------
+# Local database + stray working docs
+# -------------------------
 web-search-llm-db
-learning_document.txt
-learning_tools.txt

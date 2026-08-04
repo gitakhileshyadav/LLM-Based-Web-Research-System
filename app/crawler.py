@@ -22,7 +22,7 @@ from crawl4ai.content_filter_strategy import BM25ContentFilter
 from crawl4ai.markdown_generation_strategy import DefaultMarkdownGenerator
 from crawl4ai.models import CrawlResult
 
-from config import (
+from app.config import (
     BM25_THRESHOLD,
     CRAWLER_USER_AGENT,
     CURATION_LENIENT_MAX_URLS,
@@ -35,8 +35,8 @@ from config import (
     SCIENCE_KEYWORDS,
     SCIENTIFIC_DOMAINS,
 )
-from fetcher import fallback_fetch
-from search import tokenize
+from app.fetcher import fallback_fetch
+from app.search import tokenize
 
 # Below this character count, the crawl4ai result is considered extractively
 # failed and we hand the URL to the httpx+trafilatura fallback layer. 200

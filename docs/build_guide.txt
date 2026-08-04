@@ -1,0 +1,564 @@
+How to Build This Project From Scratch — A Complete Beginner's Guide
+=====================================================================
+
+This document is written for ANYONE — you do NOT need to be a professional
+developer. It explains:
+
+  1. What this project is and why it matters
+  2. Everything you need to install before you start
+  3. Step-by-step instructions to build the whole project
+  4. How to package the app into a Docker container and push it online
+  5. How to verify everything is working
+  6. Common problems and how to fix them
+
+Follow the steps IN ORDER. Do not skip any step. If you get stuck, read the
+"Common Problems" section at the bottom.
+
+---------------------------------------------------------------------------
+SECTION 1 — WHAT IS THIS PROJECT AND WHY IT MATTERS
+---------------------------------------------------------------------------
+
+Project name: LLM Web Search (Deep Web Research Tool)
+
+What it does:
+  You type a research question, and the app:
+    1. Splits your question into several smaller research topics.
+    2. Searches the web using many search engines at once.
+    3. Opens the most relevant web pages and reads their text.
+    4. Cleans and removes advertisements/junk from the text.
+    5. Stores the useful text in a local "memory" database.
+    6. Uses an AI model (running on YOUR computer) to write a full
+       research report with sources cited.
+
+Who can use it:
+  - Students doing research and literature reviews
+  - Journalists checking facts
+  - Business people doing market research
+  - Anyone who wants answers backed by real, cited sources
+
+Why it is special (Significance):
+  - It runs ENTIRELY on your own machine. No money spent on API fees.
+  - Your questions are private — nothing is sent to Google or OpenAI.
+  - It does not just give one answer — it gives a structured report
+    from multiple real websites with sources listed.
+  - It combines several modern technologies into one working tool
+    (this is a complete project, not just a demo).
+
+The tools inside this project:
+  - Streamlit     -> the web interface you see in your browser
+  - SearXNG       -> a search engine aggregator (runs in Docker)
+  - crawl4ai      -> reads/crawls web pages
+  - ChromaDB      -> the local "memory" database
+  - Ollama        -> the AI model server (runs on your computer)
+
+---------------------------------------------------------------------------
+SECTION 2 — WHAT YOU NEED BEFORE YOU START (PREREQUISITES)
+---------------------------------------------------------------------------
+
+You need these 4 things installed. Install them in this order:
+
+  Requirement 1: Python (version 3.11)
+  ---------------------------------------------------------------
+  Python is the programming language this project is written in.
+
+  How to install:
+    1. Go to:  https://www.python.org/downloads/
+    2. Click "Download Python 3.11" (any 3.11.x version is fine).
+    3. Run the downloaded file.
+    4. IMPORTANT: Tick the box that says "Add Python to PATH".
+    5. Click "Install Now".
+
+  How to check it is installed:
+    Open a Command Prompt (press Windows key, type "cmd", press Enter)
+    and type:
+        python --version
+    You should see:  Python 3.11.x
+
+  Requirement 2: Git (optional but recommended)
+  ---------------------------------------------------------------
+  Git is used to download a copy of the project files.
+
+  How to install:
+    1. Go to:  https://git-scm.com/download/win
+    2. Download and install with all default options.
+
+  Requirement 3: Docker Desktop
+  ---------------------------------------------------------------
+  Docker runs the search-engine container (SearXNG).
+
+  How to install:
+    1. Go to:  https://www.docker.com/products/docker-desktop/
+    2. Download Docker Desktop for Windows.
+    3. Run the installer (default options are fine).
+    4. RESTART your computer when asked.
+    5. Open "Docker Desktop" and wait until the whale icon says it is
+       running. (It can take a minute on first start.)
+
+  Requirement 4: Ollama
+  ---------------------------------------------------------------
+  Ollama runs the AI model on your computer.
+
+  How to install:
+    1. Go to:  https://ollama.com
+    2. Download and install Ollama for Windows.
+    3. After installation, Ollama runs in the background.
+
+  Your computer needs at least 8 GB of RAM (16 GB is better).
+
+---------------------------------------------------------------------------
+SECTION 3 — STEP-BY-STEP BUILD INSTRUCTIONS
+---------------------------------------------------------------------------
+
+STEP 1 — Get a copy of the project files
+---------------------------------------------------------------
+Open a Command Prompt (Windows key -> type "cmd" -> Enter).
+
+Type this command and press Enter:
+
+    cd /d %USERPROFILE%\Desktop
+
+Type this command to download the project:
+
+    git clone https://github.com/yourusername/llm-web-search.git
+
+(Replace "yourusername" with your own account, OR use the address of
+the project you were given. If you already have the project folder,
+just copy it to your Desktop and skip this step.)
+
+Now go into the project folder:
+
+    cd llm-web-search
+
+---------------------------------------------------------------
+STEP 2 — Create a virtual environment (a private Python area)
+---------------------------------------------------------------
+A virtual environment keeps this project's packages separate from the
+rest of your computer. Type these commands one by one:
+
+    py -3.11 -m venv .venv
+
+Then activate it:
+
+    .venv\Scripts\activate
+
+Your prompt should now start with "(.venv)" like this:
+
+    (.venv) D:\...
+
+---------------------------------------------------------------
+STEP 3 — Install the project's packages
+---------------------------------------------------------------
+While the (.venv) is active, type:
+
+    python -m pip install --upgrade pip setuptools wheel
+    pip install -r requirements.txt
+
+This downloads all the software packages the project needs. It can
+take 5-15 minutes. If you see red error text, read the "Common
+Problems" section at the bottom.
+
+---------------------------------------------------------------
+STEP 4 — Install the browser that reads web pages
+---------------------------------------------------------------
+The project uses a hidden browser to open web pages. Install it with:
+
+    playwright install chromium
+
+This downloads a web browser (~150 MB). Wait until it finishes.
+
+---------------------------------------------------------------
+STEP 5 — Download the AI models
+---------------------------------------------------------------
+Type these commands one by one:
+
+    ollama pull nomic-embed-text
+
+Then pull the main AI model. Which one depends on your RAM:
+
+    # If you have 16 GB RAM or more (better quality):
+    ollama pull gemma3:4b
+
+    # If you only have 8 GB RAM (smaller, faster):
+    ollama pull gemma3:1b
+
+Check they are downloaded:
+
+    ollama list
+
+You should see something like:
+    NAME                   SIZE
+    gemma3:4b              3.3 GB
+    nomic-embed-text       274 MB
+
+IMPORTANT: Later, if the app shows the wrong model name, open the
+file `config.py` in any text editor (Notepad is fine) and change this
+line to match the model you downloaded:
+
+    OLLAMA_MODEL    = "gemma3:4b"
+
+---------------------------------------------------------------
+STEP 6 — Start the search-engine container (SearXNG)
+---------------------------------------------------------------
+Make sure Docker Desktop is running (whale icon).
+
+Type this command (in the project folder):
+
+    docker compose up -d
+
+This starts two containers:
+  - searxng        (the search engine)
+  - searxng-redis  (a memory cache that helps it work)
+
+Wait about 20-30 seconds, then check they are running:
+
+    docker ps
+
+You should see two rows, one named "searxng" and one named
+"searxng-redis", both with "Up" in their status.
+
+Test the search engine works (type this):
+
+    curl "http://localhost:8080/search?q=test&format=json"
+
+You should get a long JSON text that contains "results".
+
+---------------------------------------------------------------
+STEP 7 — Run the app!
+---------------------------------------------------------------
+Type:
+
+    streamlit run app/main.py
+
+After a few seconds, your browser opens automatically at:
+
+    http://localhost:8501
+
+You should see a page titled "LLM Web Search".
+
+HOW TO USE IT:
+  1. Type a research question in the box. Example:
+        What are the causes of the 2026 student protests in India?
+  2. Switch ON "Enable Web Search".
+  3. Click the blue "GO" button.
+  4. Wait. The app searches, opens web pages, stores them, and then
+     writes a full report. This can take a few minutes.
+  5. At the end you get a structured report with sources listed.
+
+To STOP the app later: go back to the Command Prompt and press
+Ctrl + C (or close the window).
+
+---------------------------------------------------------------
+STEP 8 — (Optional) Stop the containers when not using the app
+---------------------------------------------------------------
+If you want to stop the search engine to save memory:
+
+    docker compose stop
+
+To start it again later:
+
+    docker compose start
+
+---------------------------------------------------------------------------
+SECTION 4 — HOW TO PACKAGE THE APP INTO A DOCKER CONTAINER AND PUSH IT
+---------------------------------------------------------------------------
+
+So far the app runs directly on your computer. If you want to share it
+or deploy it on a server, you package the app into a "Docker image" and
+upload ("push") it to an online registry. Anyone can then pull and run
+it with one command.
+
+WHAT IS A CONTAINER?
+  Think of a container as a portable box that contains the app AND
+  everything it needs (Python, packages, browser). It runs the same
+  anywhere.
+
+PART A — Create a Docker account and registry
+---------------------------------------------------------------
+  1. Go to:  https://hub.docker.com/signup
+  2. Create a free account.
+  3. Remember your username and password. Use a lowercase username
+     (Docker requires it).
+
+PART B — Create the Dockerfile (the recipe for the app's box)
+--------------------------------------------------------------
+In the project folder there is already a "docker" folder. Create a
+new file inside it named exactly:
+
+    docker/Dockerfile
+
+(Use Notepad: open Notepad, paste the text below, click File -> Save
+As, choose "All files", name it "Dockerfile" with NO .txt extension.
+Save it inside the "docker" folder.)
+
+Put this text inside the Dockerfile:
+
+    # Step 1: Start from a base image with Python 3.11
+    FROM python:3.11-slim
+
+    # Step 2: Tell Python not to write .pyc files (keeps image smaller)
+    ENV PYTHONDONTWRITEBYTECODE=1
+    ENV PYTHONUNBUFFERED=1
+
+    # Step 3: Install the web browser that crawl4ai needs
+    RUN apt-get update && apt-get install -y \
+        libgomp1 \
+        && rm -rf /var/lib/apt/lists/*
+
+    # Step 4: Create a folder for the app inside the container
+    WORKDIR /app
+
+    # Step 5: Copy the requirements file first (Docker caches this)
+    COPY requirements.txt .
+
+    # Step 6: Install all Python packages
+    RUN pip install --no-cache-dir -r requirements.txt
+
+    # Step 7: Install the headless browser
+    RUN playwright install chromium --with-deps
+
+    # Step 8: Copy all the project files into the container
+    COPY . .
+
+    # Step 9: Tell Docker which port the app uses
+    EXPOSE 8501
+
+    # Step 10: Command to start the app when the container runs
+    CMD ["streamlit", "run", "app/main.py", "--server.port=8501", "--server.address=0.0.0.0"]
+
+PART C — Create a .dockerignore file (tells Docker what NOT to copy)
+---------------------------------------------------------------
+Create another file inside the "docker" folder named exactly:
+
+    docker/.dockerignore
+
+Put this inside it:
+
+    .venv
+    __pycache__
+    *.pyc
+    web-search-llm-db
+    docs
+    .git
+    *.log
+
+PART D — Build the image and push it to the registry
+---------------------------------------------------------------
+Open a Command Prompt in the project folder (with Docker Desktop
+running). Type these commands one by one:
+
+Step 1 — Log in to Docker Hub (use your Docker username/password):
+
+    docker login
+
+Step 2 — Build the image. IMPORTANT: replace "yourusername" below
+with YOUR Docker username:
+
+    docker build -t yourusername/llm-web-search-app:1.0 -f docker/Dockerfile .
+
+The dot at the end is important. This takes several minutes the
+first time.
+
+Step 3 — Push (upload) the image to the registry:
+
+    docker push yourusername/llm-web-search-app:1.0
+
+That's it. Your app is now online and can be downloaded by anyone with:
+
+    docker pull yourusername/llm-web-search-app:1.0
+
+PART E — Run everything together (app + search engine)
+---------------------------------------------------------------
+The app needs the search engine (SearXNG) and the AI server (Ollama)
+to work. When running inside Docker, create a file inside the "docker"
+folder named exactly:
+
+    docker/docker-compose.app.yml
+
+Put this text inside (replace "yourusername" with YOUR username):
+
+    version: "3.9"
+
+    services:
+      searxng-redis:
+        image: redis:8-alpine
+        container_name: searxng-redis
+        command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+        volumes:
+          - searxng-redis-data:/data
+        networks:
+          - searxng-net
+        healthcheck:
+          test: ["CMD", "redis-cli", "ping"]
+          interval: 5s
+          timeout: 3s
+          retries: 10
+          start_period: 5s
+        restart: unless-stopped
+
+      searxng:
+        image: searxng/searxng:2026.8.1-8892414dc
+        container_name: searxng
+        ports:
+          - "8080:8080"
+        volumes:
+          - ../searxng_config:/etc/searxng:rw
+        environment:
+          - SEARXNG_BASE_URL=http://localhost:8080/
+          - SEARXNG_SECRET=mysecretkey123
+          - SEARXNG_LIMITER=false
+        depends_on:
+          searxng-redis:
+            condition: service_healthy
+        networks:
+          - searxng-net
+        restart: unless-stopped
+
+      app:
+        image: yourusername/llm-web-search-app:1.0
+        container_name: llm-web-search-app
+        ports:
+          - "8501:8501"
+        volumes:
+          # Keep the database safe even if the container is replaced
+          - web-search-db:/app/web-search-llm-db
+        environment:
+          # Windows/macOS: use host.docker.internal to reach Ollama on
+          # your computer. On Linux use 172.17.0.1 instead.
+          - OLLAMA_BASE_URL=http://host.docker.internal:11434
+        depends_on:
+          - searxng
+        networks:
+          - searxng-net
+        restart: unless-stopped
+
+    networks:
+      searxng-net:
+        driver: bridge
+
+    volumes:
+      searxng-redis-data:
+      web-search-db:
+
+Then start everything with (run from the PROJECT folder, not the
+docker folder):
+
+    docker compose -f docker/docker-compose.app.yml up -d
+
+Open the app at:  http://localhost:8501
+
+NOTE: The app inside Docker must be able to reach Ollama. Ollama runs
+on your computer, so we point to "host.docker.internal:11434" which is
+Docker's special name for "your own computer". If the app cannot
+connect to Ollama, see "Common Problems" #5 below.
+
+MOST APPROPRIATE WAY TO DO THIS (best practice summary)
+---------------------------------------------------------------
+  - Keep the app image separate from the search engine container.
+    One image = one job. This is the correct, professional setup.
+  - Pin image versions (we use fixed versions/digests, not "latest")
+    so your project works identically tomorrow.
+  - Never bake passwords into the Dockerfile. Use environment
+    variables (the "environment:" section above) so secrets can change
+    without rebuilding.
+  - Store the database on a Docker volume (web-search-db) so restarting
+    the container does not delete your data.
+  - Use a .dockerignore so the image stays small and fast.
+
+---------------------------------------------------------------------------
+SECTION 5 — HOW TO VERIFY EVERYTHING IS WORKING (CHECKLIST)
+---------------------------------------------------------------------------
+
+  [ ] python --version          shows Python 3.11.x
+  [ ] .venv is active           prompt starts with "(.venv)"
+  [ ] pip install completed     no big red errors
+  [ ] playwright install done   browser installed
+  [ ] ollama list               shows gemma + nomic-embed-text
+  [ ] docker ps                 shows searxng and searxng-redis "Up"
+  [ ] curl ...format=json       returns results
+  [ ] streamlit run app/main.py  opens http://localhost:8501
+  [ ] GO button with search on  produces a full report with sources
+
+---------------------------------------------------------------------------
+SECTION 6 — COMMON PROBLEMS AND HOW TO FIX THEM
+---------------------------------------------------------------------------
+
+Problem 1: "pip is not recognized" or "python is not recognized"
+  Fix: You did not tick "Add Python to PATH" during install.
+       Reinstall Python and make sure the box is ticked, OR use:
+           py -3.11 -m pip install -r requirements.txt
+           py -3.11 -m venv .venv
+
+Problem 2: crawl4ai or chromadb fails to install
+  Fix: You must use Python 3.11 (not 3.13). Delete the .venv folder
+       and recreate it with:
+           py -3.11 -m venv .venv
+           .venv\Scripts\activate
+           pip install -r requirements.txt
+
+Problem 3: "docker: command not found" or "Cannot connect to Docker"
+  Fix: Docker Desktop is not running. Open Docker Desktop and wait for
+       the whale icon to stop animating. Then run the command again.
+
+Problem 4: SearXNG returns nothing / localhost:8080 refuses to connect
+  Fix:
+       docker compose up -d
+       docker ps
+       docker compose logs searxng
+  If it is not "Up", wait 30 seconds and check again. If it shows
+  "Error" in the logs, run:
+       docker compose down
+       docker compose up -d
+
+Problem 5: The app says it cannot connect to Ollama / model not found
+  Fix 1: Make sure Ollama is running (check the tray icon).
+  Fix 2: Run `ollama list` — if the model name differs from the one in
+         config.py, edit config.py line:  OLLAMA_MODEL = "..."
+  Fix 3: If running the app inside Docker, make sure OLLAMA_BASE_URL
+         points to host.docker.internal:11434 (see Section 4 Part E).
+
+Problem 6: Search returns irrelevant websites
+  Fix: This is normal and fixed by design — the app always searches the
+       exact topic you typed first, plus several related angles, and it
+       filters junk before crawling. If you still get poor results,
+       wait a few minutes (search engines temporarily block heavy use)
+       and try again.
+
+Problem 7: Crawling takes a long time or some pages are skipped
+  Fix: This is normal. Some websites block automatic readers. The app
+       tries again, and if it still fails it uses a backup method.
+       Only relevant pages are kept.
+
+Problem 8: Port 8501 already in use
+  Fix: Run the app on a different port:
+       streamlit run app/main.py --server.port=8502
+
+Problem 9: I want to delete all stored research data
+  Fix: In the app, use the "Reset Database" button in the left sidebar.
+       Or delete the "web-search-llm-db" folder.
+
+---------------------------------------------------------------------------
+SECTION 7 — QUICK REFERENCE (ALL COMMANDS IN ONE PLACE)
+---------------------------------------------------------------------------
+
+  cd /d %USERPROFILE%\Desktop
+  cd llm-web-search
+  py -3.11 -m venv .venv
+  .venv\Scripts\activate
+  python -m pip install --upgrade pip setuptools wheel
+  pip install -r requirements.txt
+  playwright install chromium
+  ollama pull nomic-embed-text
+  ollama pull gemma3:4b
+  docker compose up -d
+  curl "http://localhost:8080/search?q=test&format=json"
+  streamlit run app/main.py
+
+  # Docker packaging
+  docker login
+  docker build -t yourusername/llm-web-search-app:1.0 -f docker/Dockerfile .
+  docker push yourusername/llm-web-search-app:1.0
+  docker compose -f docker/docker-compose.app.yml up -d
+
+---------------------------------------------------------------------------
+DONE — you have now built the complete project. Congratulations!
+---------------------------------------------------------------------------

@@ -1,0 +1,328 @@
+SearXNG Docker — How It Works, Config Files, and What the User Needs
+====================================================================
+
+This guide answers three questions about the SearXNG search engine that
+ships with this project:
+
+  1. Are we using the latest released SearXNG version? How do we run it?
+     What are limiter.toml and settings.yml?
+  2. How is the SearXNG container configured, and how is searxng-redis
+     created?
+  3. Is the searxng_config folder enough to run the container on the
+     user's machine? How does searxng_config connect to the SearXNG
+     container — and does the user install/configure SearXNG themselves
+     or just pull it from this project?
+
+The short answers:
+  - Yes, the image is the latest official release (2026.8.1-8892414dc),
+    pulled from Docker Hub — NOT built from GitHub source.
+  - `docker compose up -d` starts both containers automatically.
+  - settings.yml is SearXNG's main config; limiter.toml is optional
+    rate-limit config that is currently inactive.
+  - searxng-redis is a small Redis cache container created by the same
+    docker-compose.yml file.
+  - The user needs ONLY Docker Desktop plus the project's two files
+    (docker-compose.yml and the searxng_config folder). No manual
+    SearXNG install or configuration is required — compose pulls the
+    official image and overlays our config automatically.
+
+
+1. Where SearXNG Comes From and How We Run It
+---------------------------------------------
+
+WHERE THE IMAGE COMES FROM (Docker Hub, not GitHub)
+  SearXNG's source code lives on GitHub (github.com/searxng/searxng),
+  but we do NOT download the source and build it. The SearXNG project
+  publishes a ready-to-run container image to Docker Hub:
+
+      searxng/searxng
+
+  When `docker compose up -d` runs, Docker downloads this prebuilt
+  image from Docker Hub and starts a container from it. The version
+  tag we pin looks like:
+
+      searxng/searxng:2026.8.1-8892414dc
+
+  Breaking the tag down:
+     2026.8.1        = release date (1 August 2026)
+     8892414dc       = commit hash of the GitHub repo this build came from
+
+  IS IT THE LATEST RELEASE?
+  Yes. At the time of writing (Aug 2026) the newest Docker Hub release
+  is 2026.8.1-8892414dc (pushed 1 August 2026), and Docker Hub's
+  "latest" tag points to exactly this build. Our docker-compose.yml
+  pins this specific tag so the project behaves identically on every
+  machine. Pinning a tag (instead of "latest") means a future SearXNG
+  release will not silently change behaviour.
+
+  To check for / upgrade to a newer release later:
+      docker pull searxng/searxng:2026.8.1-8892414dc   # the tag we use
+      # browse all tags:  hub.docker.com/r/searxng/searxng/tags
+  To upgrade: edit the tag in docker-compose.yml, then:
+      docker compose up -d --force-recreate
+
+HOW WE RUN IT (from the project root folder)
+  Prerequisite: Docker Desktop must be installed and running.
+
+      docker compose up -d
+
+  This reads docker-compose.yml and starts TWO containers:
+      searxng         - the search engine (port 8080)
+      searxng-redis   - a Redis cache that the engine needs (see §3)
+
+  Check both are running:
+      docker ps
+  You should see two rows, both with "Up" in the Status column.
+
+  Test the search engine responds:
+      curl "http://localhost:8080/search?q=test&format=json"
+  You should get a long JSON document that contains "results".
+
+  Other useful commands:
+      docker compose logs -f searxng       # live logs
+      docker compose ps                    # status of both containers
+      docker compose stop                  # stop without deleting
+      docker compose down                  # stop AND remove containers
+      docker compose down -v               # remove containers + cache volume
+
+  PORT MAPPING
+  docker-compose.yml maps host port 8080 -> container port 8080. The
+  app (app/search.py) queries http://localhost:8080/search?format=json.
+  This "localhost" address is hardcoded as the primary instance in
+  app/config.py SEARXNG_INSTANCES.
+
+
+2. settings.yml and limiter.toml — What Each File Does
+------------------------------------------------------
+
+SearXNG reads two optional config files from /etc/searxng inside the
+container:
+  - settings.yml   (main configuration - REQUIRED to be present)
+  - limiter.toml   (rate limiter config - only read if the limiter is
+                   enabled)
+
+SETTINGS.YML (the main config)
+  This is the file SearXNG actually loads at startup. Our version in
+  searxng_config/settings.yml keeps the upstream defaults but tunes a
+  handful of keys that matter for this project:
+
+  search:
+    safe_search: 1            Moderate filtering (not Strict, not None)
+    default_lang: "en-US"     Pinned language. Plain "en" let Bing
+                              geo-locate from the server IP and return
+                              RU/IN results for English queries.
+    formats: [html, json]     "json" is REQUIRED - the app calls the
+                              JSON API at /search?format=json.
+    suspended_times:          Cooldowns after engine errors (CAPTCHA,
+                              429, Access denied) so we stop hammering
+                              a blocked engine.
+
+  server:
+    limiter: false            Rate limiter OFF. The app connects to
+                              localhost:8080 directly (no reverse
+                              proxy), so no X-Forwarded-For IP is set
+                              and the limiter would block every
+                              request. Disabled deliberately.
+    secret_key: "7c57..."     Used for signing. Overridable by the
+                              SEARXNG_SECRET env var in compose.
+    method: "POST"            SearXNG's default query method.
+
+  valkey:
+    url: redis://searxng-redis:6379/0
+                              Connects SearXNG to the Redis container
+                              by name "searxng-redis" on port 6379.
+                              This is HOW the two containers are linked
+                              (see §3).
+
+  outgoing:
+    request_timeout: 12.0     Upstream timeout (was 3.0 - too aggressive,
+                              looked bot-like).
+    pool_connections: 10      Low concurrency = less bot-like behaviour.
+    enable_http2: true        Real browsers use HTTP/2.
+
+  engines:                    The list of search engines. Many are
+                              "disabled: true" to keep the pool clean;
+                              the ones the app relies on (bing,
+                              duckduckgo, google, mwmbl, brave) are
+                              enabled.
+
+  IMPORTANT: any settings.yml placed in searxng_config REPLACES the
+  image's built-in default. The container does not merge our file with
+  the default - our file is the whole file.
+
+LIMITER.TOML (rate limiting - currently INACTIVE)
+  This file is only read when the limiter is enabled. Because our
+  settings.yml has "limiter: false", limiter.toml is NOT loaded today.
+  It is kept in the repo, ready, in case SearXNG is later placed behind
+  a reverse proxy (nginx/caddy) that sets X-Forwarded-For / X-Real-IP.
+  Then you would:
+    - flip "limiter: true" in settings.yml, and
+    - restart the container, and limiter.toml applies immediately.
+
+  What it contains:
+    [botdetection.ip_limit]
+    link_token = true         Store a per-IP link_token in Redis to
+                              detect bots that never load the search
+                              form first.
+
+    [botdetection.ip_lists]
+    pass_ip = [ "127.0.0.1", "::1", "172.17.0.1", "172.20.0.1" ]
+                              These IPs bypass the limiter. The Docker
+                              bridge gateways are pre-passed so the
+                              local Streamlit app is never throttled.
+
+
+3. How the SearXNG Container Is Configured and How searxng-redis Is Created
+---------------------------------------------------------------------------
+
+THE CONTAINERS ARE DEFINED IN docker-compose.yml
+  Both containers are described in the same docker-compose.yml file at
+  the project root. docker compose reads this file and creates both
+  containers + the private network + the cache volume for you. You do
+  NOT create them by hand.
+
+  Service 1: searxng
+      image: searxng/searxng:2026.8.1-8892414dc
+      ports: "8080:8080"
+      volumes:
+        - ./searxng_config:/etc/searxng:rw    (config overlay, see §4)
+      environment:
+        SEARXNG_BASE_URL=http://localhost:8080/
+        SEARXNG_SECRET=mysecretkey123
+        SEARXNG_LIMITER=false
+      depends_on:
+        searxng-redis:
+          condition: service_healthy
+      networks: [searxng-net]
+
+  Service 2: searxng-redis
+      image: redis:8-alpine
+      command: redis-server --save 60 1 --appendonly yes
+      volumes: searxng-redis-data:/data     (named volume - survives
+                                             restart)
+      healthcheck: redis-cli ping           (PONG only when ready)
+      networks: [searxng-net]
+
+  Also created automatically:
+      networks:
+        searxng-net:  bridge   - a private network connecting the two
+      volumes:
+        searxng-redis-data:    - persistent Redis cache storage
+
+HOW THE TWO CONTAINERS ARE CONNECTED
+  Both containers sit on the same bridge network "searxng-net", so they
+  can reach each other by container name (DNS) instead of IP:
+    - settings.yml valkey.url = redis://searxng-redis:6379/0
+      -> SearXNG finds Redis by the hostname "searxng-redis".
+  This is exactly why the container name must be "searxng-redis" (or
+  the valkey.url line must be edited to match).
+
+  WHY REDIS IS STARTED FIRST (the healthcheck chain)
+  searxng depends on redis being HEALTHY before it starts:
+    depends_on:
+      searxng-redis:
+        condition: service_healthy
+  The redis service runs `redis-cli ping` as its healthcheck and only
+  reports healthy once the server answers PONG. Without this, searxng
+  could start before redis and fail with "can't connect valkey DB",
+  which breaks the limiter / caching and causes erratic ranking.
+
+  WHAT REDIS IS USED FOR
+  Redis stores SearXNG's result cache and (when the limiter is on) the
+  link_token bot-detection data. "redis:8-alpine" is the official Redis
+  image; SearXNG talks to it over the RESP protocol via the valkey
+  client, which is why the settings key is named "valkey".
+
+  WHY THE LIMITER IS OFF EVEN THOUGH REDIS IS RUNNING
+  The limiter needs a real client IP (from a reverse proxy) to work
+  correctly. The app talks to localhost:8080 directly, so there is no
+  proxy and no X-Forwarded-For header. Keeping limiter: false avoids
+  the "every request rejected" failure mode while Redis still provides
+  the result cache. If a reverse proxy is added later, see §2.
+
+
+4. Does the searxng_config Folder Alone Run the Container on a User Machine?
+---------------------------------------------------------------------------
+
+SHORT ANSWER: Yes. The user does NOT install or configure SearXNG
+themselves, and they do NOT build the container. They only need:
+
+  - Docker Desktop installed and running
+  - the project folder (or just docker-compose.yml + searxng_config/)
+
+HOW searxng_config CONNECTS TO THE CONTAINER (bind mount)
+  In docker-compose.yml, the searxng service has:
+
+      volumes:
+        - ./searxng_config:/etc/searxng:rw
+
+  This is a "bind mount": the host folder searxng_config/ is mapped
+  into the container at /etc/searxng. When the container starts,
+  SearXNG reads /etc/searxng/settings.yml — which IS the project's
+  searxng_config/settings.yml. So the config never needs to be copied
+  into the image; it is layered on at start time.
+
+  What this means for the user:
+  - Editing searxng_config/settings.yml locally + `docker compose
+    restart searxng` applies changes immediately. No rebuild needed.
+  - Deleting the image and re-pulling does NOT lose our config — it is
+    stored in the project folder, not inside the image.
+
+  IMPORTANT: the docker-compose.app.yml variant inside docker/ mounts
+  ../searxng_config because that file lives one level deeper (docker/).
+  The paths are relative to the compose file's own folder.
+
+IS PROVIDING THE searxng_config FOLDER "ENOUGH"?
+  Almost — you also need docker-compose.yml (which tells Docker which
+  image to pull and how to mount the folder). Together these two things
+  are the complete SearXNG setup:
+
+      docker-compose.yml    -> which image, ports, env, mounts, network
+      searxng_config/       -> settings.yml (main config)
+                             -> limiter.toml (inactive, optional)
+
+  The user does NOT need to:
+    - git clone SearXNG
+    - build any image
+    - run `docker run searxng/searxng` manually
+    - create a docker-compose.yml from scratch
+    - tweak settings inside the container (docker exec ... cat > ...)
+
+STEP-BY-STEP FOR A FRESH USER MACHINE
+  1. Install Docker Desktop and start it.
+  2. Open Command Prompt / PowerShell in the project folder.
+  3. Run:   docker compose up -d
+     - Docker pulls the official image (searxng/searxng:2026.8.1-...)
+       and the redis image automatically (first time only).
+     - Compose creates both containers, the searxng-net network, the
+       redis volume, and bind-mounts searxng_config into /etc/searxng.
+  4. Wait ~20-30 seconds, then verify:
+       docker ps
+     Both "searxng" and "searxng-redis" should show "Up".
+  5. Verify search works:
+       curl "http://localhost:8080/search?q=test&format=json"
+     Expect a JSON response containing "results".
+  6. Run the app:
+       streamlit run app/main.py
+     and use a query with Web Search enabled.
+
+VERIFICATION CHECKLIST
+  [ ] Docker Desktop running
+  [ ] docker compose up -d   -> no errors
+  [ ] docker ps              -> searxng and searxng-redis both "Up"
+  [ ] curl localhost:8080/search?format=json -> JSON with "results"
+  [ ] streamlit run app/main.py -> search-enabled query returns a report
+
+TROUBLESHOOTING
+  - "can't connect valkey DB" -> redis was not healthy before searxng
+    started. Run `docker compose up -d` again (compose waits for the
+    healthcheck) or `docker compose restart searxng`.
+  - Port 8080 already in use -> change "8080:8080" in
+    docker-compose.yml AND update SEARXNG_INSTANCES[0] in app/config.py.
+  - Config changes not applied -> edit searxng_config/settings.yml,
+    then `docker compose restart searxng`.
+  - Engine CAPTCHA / 429 errors -> environmental for a no-proxy IP; the
+    app rotates engines and retries (see search_crawl_guide.txt).
+
+----------------------------------------------------------------------
+END OF GUIDE

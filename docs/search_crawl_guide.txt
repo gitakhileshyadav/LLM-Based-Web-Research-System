@@ -1,0 +1,222 @@
+Web Search & Crawling — Configuration Guide, Troubleshooting, and Stability Notes
+==================================================================================
+
+This document explains how web search and crawling are configured in this
+project, the steps taken to reach the current version, the issues faced along
+the way, and why the current version is stable.
+
+1. Architecture Overview
+------------------------
+
+End-to-end flow for a web-search query:
+
+  prompt (user)
+    -> expand_query()            Ollama generates 4 research dimensions
+    -> search_queries            = [original topic verbatim] + LLM dimensions
+    -> async_multi_search()      parallel SearXNG queries (bounded concurrency)
+    -> get_web_urls()            SearXNG JSON -> sanitize -> BM25 rank top-N
+    -> curate_urls()             pre-crawl filter (adaptive, dedup, cap)
+    -> check_robots_txt()        robots.txt compliance
+    -> crawl_webpages()          crawl4ai (standard + JS-heavy modes)
+    -> fallback_fetch()          httpx + trafilatura + BS4 rescue for empty pages
+    -> BM25ContentFilter         keep query-relevant sentences (fit_markdown)
+    -> ChromaDB                   chunk + embed (nomic-embed-text, Ollama)
+    -> synthesize_final_report   dimension answers -> final report
+
+Key files:
+  app/config.py     central configuration (instances, domains, thresholds)
+  app/search.py     SearXNG layer, engine rotation, BM25 ranking, multi-search
+  app/crawler.py    domain intelligence, prioritization, curation, crawl4ai config
+  app/fetcher.py    httpx/trafilatura/BS4 fallback extraction
+  app/main.py       Streamlit entry point, pipeline orchestration
+
+2. How Web Search Is Configured
+-------------------------------
+
+Search backend: local SearXNG metasearch via Docker.
+
+  - docker-compose.yml pins searxng 2026.8.1 (digest-pinned) + redis:8-alpine.
+  - limiter disabled (limiter: false) — app connects to localhost:8080 directly.
+  - JSON format enabled so the app can call the /search JSON API.
+  - default_lang: "en-US" — Bing needs the full locale tag to pick the right
+    regional index (plain "en" let it geo-locate and returned RU/IN results).
+
+Instances (config.py SEARXNG_INSTANCES):
+  - http://localhost:8080        primary — local Docker, always available
+  - https://searx.tiekoetter.com fallback 1
+  - https://searxng.world        fallback 2
+
+Engine strategy (search.py ENGINE_SETS):
+  - bing       : works reliably, no CAPTCHA / 429 -> leads every set
+  - mwmbl      : reliable headline-only index -> backup
+  - duckduckgo : CAPTCHA-prone from this IP -> secondary, falls through
+  - brave      : HTTP 429-prone from this IP -> secondary, falls through
+  - google     : returns 0 results (proxy-detected) -> excluded
+
+  Each sub-query is assigned a different engine set (round-robin), so one
+  upstream outage only affects 1/N dimensions instead of all of them.
+
+Query safety & hygiene:
+  - sanitize_query(): strips control/injection chars, caps at 200 chars.
+  - DISCARD_DOMAINS (youtube/reddit/quora/facebook/etc.) are enforced
+    POST-HOC in _query_one_engine_set() (skip matching URLs). They are NOT
+    appended to the query text anymore — appending "-site domain" bloated
+    the query and made Bing misparse multi-word phrases.
+  - BLOCKED_HOSTS + scheme whitelist = SSRF protection.
+  - _CLIENT_TIMEOUT = 12.0s (matches SearXNG outgoing.request_timeout).
+
+Parallelism & resilience:
+  - Semaphore(3) bounds concurrent SearXNG requests; small jitter decorrelates
+    the burst.
+  - Each query tries engine sets -> remote fallback instances -> second pass
+    after backoff -> single "generic" query (no engines restriction) as the
+    last line of defence.
+  - async_multi_search() retries ONLY the dimensions that came back empty, with
+    a different engine set, so one transient outage doesn't wipe a dimension.
+
+3. How Crawling Is Configured
+-----------------------------
+
+Crawler: crawl4ai==0.4.248 (AsyncWebCrawler + Playwright Chromium).
+
+Content filtering:
+  - BM25ContentFilter(user_query=prompt, bm25_threshold=1.5, language="english")
+    keeps only query-relevant sentences -> stored as fit_markdown.
+  - DefaultMarkdownGenerator options: ignore_links/images, body_width 0,
+    skip_internal_links, include_sup_sub False, mark_code True.
+
+Crawl modes:
+  - Standard: text_mode + light_mode browser (fast), CacheMode.ENABLED,
+    word_count_threshold 50, page_timeout 20s, delay 2s.
+  - JS-heavy: full browser render, wait_for "css:article,main,p",
+    scroll simulation js_code (lazy-loaded content), page_timeout 45s,
+    delay 5s, word_count_threshold 30. Used for news/media domains
+    (JS_HEAVY_DOMAINS).
+
+Caching:
+  - CacheMode.ENABLED (was BYPASS). Streamlit re-runs the whole script on
+    every interaction; ENABLED makes repeated crawls of the same URL instant.
+
+Fallback extraction (fetcher.py):
+  - If crawl4ai returns < 200 chars, the URL is handed to fallback_fetch():
+    httpx (browser UA, redirects) -> trafilatura -> BS4 <p> scrape.
+  - This rescues JS sites that return empty despite a 200.
+
+Pre-crawl curation (curate_urls in crawler.py):
+  - Trusted news/science/priority domains pass through unconditionally.
+  - Non-trusted root homepages (path empty or "/") are dropped.
+  - Non-trusted URLs must share >= MIN_URL_TOKEN_OVERLAP (2) substantive
+    prompt tokens in the URL, else dropped (kills impact.com matching only
+    "impact").
+  - Dedupe per host (MAX_URLS_PER_DOMAIN = 3) and total cap
+    (MAX_CRAWL_URLS = 12).
+  - ADAPTIVE: when the merged pool is small (<= CURATION_LENIENT_MAX_URLS = 6),
+    it switches to lenient mode — only drops non-trusted root homepages and
+    applies the per-host cap. It does NOT apply the token-overlap filter or
+    total cap, so a degraded search never collapses into one useless URL.
+
+4. Steps Taken to Reach the Current Version
+-------------------------------------------
+
+ 1. Self-hosted SearXNG in Docker (localhost:8080) so search no longer depends
+    on flaky public instances; enabled JSON API.
+ 2. Removed the "-site domain" suffix from every query — it bloated the query
+    and made Bing return generic single-word matches instead of the topic.
+ 3. Always search the ORIGINAL topic verbatim first (search_queries =
+    [prompt] + LLM dimensions). This is what surfaces the directly relevant
+    links (e.g. "Student protest India 2026" -> Wikipedia Jantar Mantar page,
+    Reuters, Al Jazeera).
+ 4. Switched cache from BYPASS to ENABLED so Streamlit re-runs don't re-crawl
+    every URL.
+ 5. Reverted arun_many() to a serial arun() loop because arun_many silently
+    skips the BM25 content filter in crawl4ai 0.4.248.
+ 6. Hardened the retry/fallback path so a failed arun() (None result) no
+    longer crashes.
+ 7. Hardened fetcher fallback against event-loop shutdown.
+ 8. Added adaptive pre-crawl curation to filter junk URLs without starving
+    small result pools.
+
+5. Issues Faced & How They Were Fixed
+-------------------------------------
+
+A. arun_many() silently disables BM25 (fit_markdown empty).
+   Symptom: every crawled result had fit_md=0 even though raw markdown was
+   intact — the query-relevance filter was never applied.
+   Fix: crawl priority/standard URLs serially with crawler.arun(url, config)
+   one at a time, which applies the markdown generator correctly.
+
+B. _make_fallback_result() crashed and killed the whole crawl.
+   Symptom: crawl aborted mid-run with 0 chars for remaining URLs after the
+   first fallback fired.
+   Root cause: CrawlResult is a pydantic model; `html` and `success` are
+   REQUIRED fields. Constructing CrawlResult(url=url, markdown=text) raised a
+   ValidationError.
+   Fix: build with html="", success=True, metadata={} and a try/except for
+   older crawl4ai versions that reject fit_markdown at construction.
+
+C. "cannot schedule new futures after shutdown" during fallback.
+   Symptom: RuntimeError when asyncio.to_thread() was called while the event
+   loop was shutting down (Streamlit teardown) — every fallback fetch failed.
+   Fix: try asyncio.to_thread() first; on RuntimeError fall back to calling
+   the synchronous _fetch_html_sync() directly.
+
+D. Crash on result=None in the retry helper.
+   Symptom: AttributeError on result.url when arun() returned None.
+   Fix: _maybe_retry_and_fallback() now treats None as "0 chars" and handles
+   the URL string defensively.
+
+E. Engine suspensions from a no-proxy IP.
+   Symptom: DDG CAPTCHA, brave 429, mwmbl timeout; dimensions returning 0 URLs.
+   Fix: rotating engine sets with bing always leading, remote-instance
+   fallback, a second pass after backoff, and a final generic no-restriction
+   query. These are environmental; code absorbs them via retries.
+
+F. Search returned irrelevant URLs.
+   Symptom: for "Student protest India 2026" the app got NASA "causes" pages
+   and impact.com, while a manual Bing search returned the Jantar Mantar
+   Wikipedia/Reuters/Al Jazeera links.
+   Root cause: (1) the original topic was never searched — only generic LLM
+   dimensions like "causes and triggers for 2026 Indian student
+   demonstrations"; (2) "-site ..." suffixes made Bing misparse the phrase.
+   Fix: prepend the exact prompt to the search list, and send the clean full
+   sentence to SearXNG.
+
+G. Over-aggressive curation collapsed tiny pools.
+   Symptom: a run where engines were suspended returned only 3 URLs, curation
+   dropped 2, and one useless portal URL was crawled -> empty answer.
+   Fix: adaptive lenient mode — small pools keep nearly everything.
+
+H. Junk single-word matches reaching the crawler.
+   Symptom: impact.codeninjas.com, impact.com, causes.com, etc. matching only
+   one generic word in the dimension title.
+   Fix: token-overlap gate on non-trusted URLs + per-host dedupe in curation.
+
+6. Why the Current Version Is Stable
+------------------------------------
+
+  - Search always starts with the exact topic, so the top links are directly
+    relevant. Verified live: "Student protest India 2026" returns the
+    2026_Delhi_Jantar_Mantar_protests Wikipedia page, The Hindu, CNN, ET.
+  - No remaining crash paths in the crawl: fallback construction is valid,
+    retry handles None, and fetcher survives event-loop shutdown.
+  - BM25 relevance filtering is active again (serial arun instead of
+    arun_many).
+  - Caching + curation are balanced: Streamlit re-runs are fast, junk URLs are
+    filtered before the crawler, and small pools are never over-filtered.
+  - Search is resilient: engine rotation + retry + generic fallback keep
+    dimensions alive even when upstream engines are suspended.
+
+7. Known Limitations / Trade-offs
+---------------------------------
+
+  - Requires local Ollama (for embeddings + query expansion) and SearXNG
+    Docker to be running.
+  - Engine suspensions (DDG CAPTCHA, brave 429, mwmbl timeout) are
+    environmental for a no-proxy IP; retries absorb them but cannot eliminate
+    them.
+  - With CacheMode.ENABLED, cached crawls return empty fit_markdown (BM25 is
+    not re-applied on cache hits); vectordb falls back to the raw markdown, so
+    content still flows, but the first crawl per URL is the only one with
+    fit_markdown.
+  - Curation caps the crawl at MAX_CRAWL_URLS (12); a huge multi-topic query
+    may drop low-priority links.

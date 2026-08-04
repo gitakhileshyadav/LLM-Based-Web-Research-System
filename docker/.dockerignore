@@ -1,0 +1,10 @@
+# Files/folders that must NOT be copied into the Docker image
+# (keeps the image small and keeps secrets/cache out of the build).
+.venv
+__pycache__
+*.pyc
+web-search-llm-db
+docs
+.git
+*.log
+.dockerignore

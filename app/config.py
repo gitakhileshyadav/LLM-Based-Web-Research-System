@@ -1,5 +1,8 @@
 """Centralized configuration for the LLM Deep Web Research Tool."""
 
+import os
+
+_PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # ── Crawler / HTTP ───────────────────────────────────────────────────────────
 
@@ -73,7 +76,9 @@ MAX_CRAWL_URLS = 12
 
 # ── Vector Database ───────────────────────────────────────────────────────────
 
-CHROMA_DIR_PATH  = "./web-search-llm-db"
+# Resolved against the project root so the DB directory is stable no matter
+# where the app is launched from (streamlit run app/main.py, docker, tests).
+CHROMA_DIR_PATH  = os.path.join(_PROJECT_ROOT, "web-search-llm-db")
 COLLECTION_NAME  = "web_llm"
 EMBEDDING_MODEL  = "nomic-embed-text"
 CHUNK_SIZE       = 500

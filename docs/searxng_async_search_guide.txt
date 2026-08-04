@@ -1,0 +1,318 @@
+How SearXNG Queries Are Run Asynchronously — Full Code Walkthrough
+==================================================================
+
+This guide explains, with code references, how this project queries SearXNG
+asynchronously across multiple research dimensions, why the architecture is
+the way it is, and how each piece behaves.
+
+The short answer:
+  - SearXNG HTTP calls are blocking `requests.get()` under the hood. The app
+    does NOT use async HTTP against SearXNG. Instead it uses asyncio to
+    orchestrate many blocking calls at once, pushing each one onto a thread
+    pool via `asyncio.run_in_executor()` so the UI stays responsive and up to
+    3 dimensions run "in parallel".
+  - SearXNG itself is async internally (its own event loop fans out to
+    upstream engines like Bing/DDG/Google), which is why a single
+    `requests.get()` returns a merged result in ~1-3s.
+  - Concurrency is bounded (Semaphore(3)) and jittered so we never hammer
+    the local SearXNG instance or look bot-like.
+
+
+1. The Two Kinds of "Async" Involved
+------------------------------------
+
+There are two separate async systems, and it is important not to confuse them:
+
+A) SearXNG's INTERNAL async engine fan-out
+   SearXNG (the Docker container) is a Python asyncio web app. When it
+   receives one search request, it fans out to many upstream engines in
+   parallel on its own event loop, then merges and ranks the results. From
+   our client's point of view this is just one HTTP request that takes a few
+   seconds.
+
+B) OUR app's async orchestration of multiple SearXNG calls
+   The app has one user prompt, which the LLM expands into 4 research
+   dimensions (search.py / main.py). It must call SearXNG once per dimension
+   (plus the original topic). Our code uses asyncio to run up to 3 of those
+   calls concurrently.
+
+This guide is about (B).
+
+
+2. The Call Chain — From Prompt to Results
+------------------------------------------
+
+main.py (Streamlit entry, async)
+
+  async def run()                                  # app/main.py:47
+
+    1. expand_query(prompt, query_type)            # app/llm.py:12
+       -> returns 4 LLM-generated research dimensions
+
+    2. search_queries = [prompt] + [the 4 dimensions]
+       (original topic first, so the directly relevant links surface)
+
+    3. search_results = await async_multi_search(
+           sub_queries=search_queries,
+           delay_between=3.0,
+       )                                            # app/main.py:104
+
+    4. all_urls = merge + dedupe URLs across all dimensions
+       then curate_urls(), check_robots_txt(), crawl_webpages(), etc.
+
+The async engine is async_multi_search() in app/search.py:412.
+
+
+3. async_multi_search() — The Async Orchestrator
+------------------------------------------------
+
+Signature (app/search.py:412):
+
+    async def async_multi_search(
+        sub_queries: list[str],
+        delay_between: float = 3.0,
+    ) -> dict[str, list[str]]:
+
+Constants that govern it (app/search.py:401-409):
+
+    _MAX_CONCURRENCY = 3      # max sub-queries hitting SearXNG at once
+    _JITTER_RANGE = (0.2, 0.8)  # seconds of random pre-sleep per task
+
+Step-by-step:
+
+STEP 1 — BOUNDED SEMAPHORE (search.py:432)
+    sem = asyncio.Semaphore(_MAX_CONCURRENCY)
+    No more than 3 sub-queries are ever in flight simultaneously.
+
+STEP 2 — INNER COROUTINE (search.py:435-446)
+    async def _search_one(i, q, set_offset):
+        async with sem:                                  # acquire slot
+            await asyncio.sleep(random.uniform(*_JITTER_RANGE))   # jitter
+            eset = ENGINE_SETS[(i + set_offset) % len(ENGINE_SETS)]  # rotate
+            urls = await loop.run_in_executor(           # THE key line
+                None,
+                lambda: get_web_urls(search_term=q, engine_set=eset),
+            )
+            return q, urls
+
+    What each line does:
+      - The semaphore caps in-flight work at 3.
+      - The jitter sleep decorrelates the burst so 3 requests don't arrive
+        at SearXNG at the exact same millisecond.
+      - Engine rotation assigns each sub-query a different engine mix
+        (see §5), so one suspended upstream engine only hurts the
+        dimensions mapped to it.
+      - run_in_executor pushes the BLOCKING get_web_urls() call onto a
+        thread pool. The event loop is not blocked while the request runs.
+
+STEP 3 — PASS 1: FAN-OUT ALL DIMENSIONS (search.py:448-453)
+    pairs = await asyncio.gather(
+        *[_search_one(i, q, 0) for i, q in enumerate(sub_queries)],
+        return_exceptions=False,
+    )
+    results = dict(pairs)
+
+    gather() starts every sub-query concurrently; the semaphore throttles
+    them to 3 at a time. Total wall time is roughly
+    N/3 * (single-search-time + jitter) instead of N * (search + 3s sleep).
+
+STEP 4 — PASS 2: RETRY ONLY EMPTY DIMENSIONS (search.py:460-471)
+    failed = [q for q, urls in results.items() if not urls]
+    if failed:
+        await asyncio.sleep(random.uniform(1.0, 2.0))
+        indexes = {q: i for i, q in enumerate(sub_queries)}
+        retry_pairs = await asyncio.gather(
+            *[_search_one(indexes[q], q, 1) for q in failed],
+            return_exceptions=False,
+        )
+        for q, urls in retry_pairs:
+            if urls:
+                results[q] = urls
+
+    Why: if an upstream engine timed out for one dimension, a retry with a
+    DIFFERENT engine set (set_offset=1 rotates to the next ENGINE_SETS entry)
+    usually recovers it. Only the failed dimensions are retried, so a single
+    transient outage never wipes out an entire dimension.
+
+STEP 5 — RETURN (search.py:473)
+    return results
+    A dict of {query_string: [ranked_urls]} consumed by main.py:114.
+
+NOTE on `delay_between` (search.py:426-427):
+    The parameter is kept for backwards compatibility with app.py but is
+    IGNORED. The semaphore + jitter replace the old fixed 3-second sleep,
+    which is why throughput improved ~5x while staying polite.
+
+
+4. The Blocking Layer — get_web_urls() and _query_one_engine_set()
+-----------------------------------------------------------------
+
+Because run_in_executor calls get_web_urls() on a worker thread, everything
+below it is ordinary blocking code.
+
+get_web_urls() (app/search.py:307)
+  Orchestrates one dimension's search:
+    - sanitize_query()            # strip injection chars, cap length
+    - picks engine sets to try    # supplied set, or all ENGINE_SETS in order
+    - tries every engine set on every instance, with retries + fallbacks:
+
+    for attempt in range(2):                        # search.py:355
+        for instance_url in SEARXNG_INSTANCES:      # local first, then remotes
+            for eset in sets_to_try:
+                urls = _query_one_engine_set(...)
+                if urls:
+                    time.sleep(random.uniform(0.3, 0.8))   # small backoff
+                    return urls
+        # attempt 1 -> sleep 2-4s, then try again (engines may have cooled)
+        # attempt 2 -> generic fallback with engine_set=None (no restriction)
+
+  Instance order (app/config.py SEARXNG_INSTANCES):
+    http://localhost:8080         primary (local Docker)
+    https://searx.tiekoetter.com  fallback 1
+    https://searxng.world         fallback 2
+
+  Retry logic:
+    - Both attempts loop all instances + sets.
+    - If all empty after attempt 1: sleep random 2.0-4.0s, then attempt 2.
+    - Attempt 2's last resort: ONE "generic" query with engine_set=None
+      (search.py:380-391) so SearXNG uses whichever engines are not
+      currently suspended.
+
+_query_one_engine_set() (app/search.py:213)
+  The actual HTTP call for a single (instance, engine-set) combo:
+
+    params = {
+        "format":   "json",        # JSON API (search.py:228)
+        "language": "en-US",       # full locale so Bing picks the right index
+        "pageno":   1,
+        "q":        search_term,
+    }
+    if engine_set is not None:
+        params["engines"] = ",".join(engine_set)
+    search_url = f"{instance_url}/search"          # e.g. localhost:8080/search
+    response = requests.get(search_url, params=params,
+                            headers=HEADERS, timeout=_CLIENT_TIMEOUT,
+                            allow_redirects=True, verify=True)
+
+  _CLIENT_TIMEOUT = 12.0s (search.py:210) — matches SearXNG's own
+  outgoing.request_timeout (12s in searxng_config/settings.yml), so the
+  client never out-waits the server.
+
+  Error handling (search.py:242-265):
+    - Timeout/ConnectionError/Exception -> return [] (caller rotates to next set)
+    - HTTP 429 -> log "backing off", return [] (polite)
+    - non-200 -> return []
+    - Content-Type not application/json -> ValueError (return [])
+
+  Response processing (search.py:267-304):
+    - safe_parse_response() checks Content-Type + parses JSON, reports
+      "unresponsive_engines".
+    - Each raw result is validated: is_safe_url() (SSRF: scheme whitelist +
+      BLOCKED_HOSTS + reject raw IPs, search.py:143), DISCARD_DOMAINS filter,
+      _DEFINITION_TITLE_RE filter.
+    - Collects up to SEARCH_CANDIDATE_POOL candidates so BM25 can rank across
+      all of them, not just the engine's top-5.
+    - _rank_sources(clean_term, safe_urls, top_n) (search.py:72) scores the
+      pool with BM25Okapi and returns only genuinely relevant URLs.
+
+
+5. Engine Rotation — Spreads Load, Survives Outages
+---------------------------------------------------
+
+ENGINE_SETS (app/search.py:200-204):
+
+    [
+        ["bing", "duckduckgo"],          # bing primary, DDG backup
+        ["bing", "mwmbl", "brave"],      # bing + mwmbl reliable, brave bonus
+        ["bing", "duckduckgo", "brave"], # mixed: bing anchors it
+    ]
+
+Assignment (search.py:439):
+    eset = ENGINE_SETS[(i + set_offset) % len(ENGINE_SETS)]
+
+  - Dimension i gets set 0, i+1 gets set 1, i+2 gets set 2, i+3 wraps to 0.
+  - Retry pass uses set_offset=1, so the retried dimension gets a DIFFERENT
+    mix (e.g. a dimension that timed out on DDG+brave retries on bing+mwmbl).
+  - Every set leads with bing because it is the most reliable engine from a
+    no-proxy residential IP (no CAPTCHA/429), so even when DDG/brave are
+    cooling down, every dimension still gets results.
+
+
+6. Why Not Pure Async HTTP (aiohttp/httpx.AsyncClient)?
+-------------------------------------------------------
+
+The code deliberately uses blocking `requests` inside a thread pool instead
+of an async HTTP client:
+
+  1. Simplicity + robustness: `requests` is battle-tested; no event-loop
+     integration bugs in a Streamlit app.
+  2. The real bottleneck is upstream engines, not our client. SearXNG already
+     merges results asynchronously; one synchronous HTTP call to it is enough.
+  3. Bounded concurrency with a semaphore gives the same throughput as async
+     HTTP for far less code and fewer failure modes (see §4 retry logic).
+  4. Streamlit re-runs the whole script on every interaction; a
+     thread-pool approach is easy to cancel/restart without leaking
+     connections from async sessions.
+
+The `run_in_executor(None, ...)` call uses the default ThreadPoolExecutor,
+which is fine because only 3 SearXNG calls are in flight at once.
+
+
+7. End-to-End Async Flow Diagram
+--------------------------------
+
+  user prompt
+    │
+    ▼
+  expand_query()  ──►  [prompt] + 4 dimensions        (llm.py:12)
+    │
+    ▼
+  await async_multi_search(search_queries)             (main.py:104 / search.py:412)
+    │
+    ├─ Semaphore(3)  ──►  3 slots total
+    │
+    ├─ Pass 1: asyncio.gather over ALL dimensions
+    │      └─ each task: jitter sleep (0.2-0.8s)
+    │            └─ rotate ENGINE_SETS[(i+0) % 3]
+    │                  └─ run_in_executor ──► get_web_urls()  [worker thread]
+    │                        └─ for instance in SEARXNG_INSTANCES
+    │                              └─ for eset in ENGINE_SETS
+    │                                    └─ _query_one_engine_set()
+    │                                          └─ requests.get(localhost:8080/search?format=json&engines=...)
+    │                                                └─ SearXNG async-fans-out upstream engines
+    │                                                └─ safe_parse_response -> BM25 rank -> top-N URLs
+    │
+    ├─ Pass 2: retry ONLY empty dimensions, set_offset=1 (different engines)
+    │
+    ▼
+  dict { query: [ranked_urls] }   ──►  main.py merges/dedupes -> curate -> crawl
+
+
+8. Configuration Summary (search-related)
+-----------------------------------------
+
+  app/config.py
+    SEARXNG_INSTANCES           local + 2 remote fallback instances
+    SEARCH_CANDIDATE_POOL       how many candidates BM25 ranks (not top-5)
+    MAX_QUERY_LENGTH            sanitize_query() cap
+    ALLOWED_SCHEMES             http/https whitelist (SSRF)
+    BLOCKED_HOSTS               internal/private IP blocklist (SSRF)
+    DISCARD_DOMAINS             youtube/reddit/quora/etc. excluded post-hoc
+
+  app/search.py
+    _MAX_CONCURRENCY = 3        semaphore bound
+    _JITTER_RANGE = (0.2, 0.8)  per-task decorrelation sleep
+    _CLIENT_TIMEOUT = 12.0      requests timeout (matches SearXNG server)
+    ENGINE_SETS                 the 3 rotating engine mixes
+    _TOKEN_RE / _STOPWORDS      tokenizer for BM25
+    _DEFINITION_TITLE_RE        drops dictionary/definition pages
+
+  searxng_config/settings.yml
+    search.default_lang: "en-US"   full locale for correct regional index
+    search.formats: [html, json]   JSON API required by the app
+    search.suspended_times         cooldowns after CAPTCHA/429/403
+    outgoing.request_timeout: 12.0 matches the client timeout
+    outgoing.pool_connections: 10  low = less bot-like
+
+----------------------------------------------------------------------
+END OF GUIDE

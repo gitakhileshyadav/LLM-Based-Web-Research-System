@@ -16,10 +16,16 @@ import time
 import streamlit as st
 import chromadb
 from chromadb.config import Settings
-from chromadb.utils import embedding_functions
+from chromadb.api.types import Embeddings
 from crawl4ai.models import CrawlResult
 from langchain_community.document_loaders import UnstructuredMarkdownLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+try:
+    import httpx
+    _HAS_HTTPX = True
+except ImportError:
+    _HAS_HTTPX = False
 
 from app.config import (
     CHROMA_DIR_PATH,
@@ -32,11 +38,104 @@ from app.config import (
 )
 
 
+class BatchedOllamaEmbeddingFunction:
+    """
+    ChromaDB embedding function backed by Ollama's /api/embed endpoint.
+
+    Unlike the stock chromadb OllamaEmbeddingFunction (which opens an
+    httpx.Client with NO timeout - so the default 5s applies - and sends one
+    HTTP request per text), this:
+      - uses a generous read timeout (model load + batch embed can take a
+        while on the first call),
+      - sends ALL texts in a SINGLE batched POST (`input` is a list), so N
+        chunks cost one round-trip instead of N,
+      - retries transient failures (timeout / connect / 5xx) with a short
+        backoff, then re-raises so the caller can skip the URL instead of
+        the whole run crashing.
+    """
+    def __init__(
+        self,
+        url: str,
+        model_name: str,
+        timeout: httpx.Timeout | None = None,
+        max_retries: int = 2,
+    ) -> None:
+        self._api_url = f"{url.rstrip('/')}/api/embed"
+        self._model_name = model_name
+        self._max_retries = max_retries
+        if timeout is None:
+            timeout = httpx.Timeout(
+                connect=10.0,
+                read=120.0,      # first call must load the model into memory
+                write=120.0,
+                pool=10.0,
+            )
+        self._timeout = timeout
+
+    def __call__(self, input) -> Embeddings:
+        texts = input if isinstance(input, list) else [input]
+        texts = [t for t in texts if t and str(t).strip()]
+        if not texts:
+            return []
+
+        if not _HAS_HTTPX:
+            raise RuntimeError("httpx not installed - cannot embed via Ollama")
+
+        last_error: Exception | None = None
+        for attempt in range(self._max_retries + 1):
+            try:
+                with httpx.Client(timeout=self._timeout) as client:
+                    resp = client.post(
+                        self._api_url,
+                        json={"model": self._model_name, "input": texts},
+                    )
+                    if resp.status_code >= 500:
+                        raise RuntimeError(
+                            f"Ollama returned HTTP {resp.status_code}"
+                        )
+                    if resp.status_code != 200:
+                        # 404 -> model missing, 400 -> bad request, etc.
+                        raise RuntimeError(
+                            f"Ollama returned HTTP {resp.status_code}: "
+                            f"{resp.text[:200]}"
+                        )
+                    data = resp.json()
+            except (httpx.TimeoutException, httpx.ConnectError) as e:
+                last_error = e
+                time.sleep(0.5 * (attempt + 1))
+                continue
+            except Exception as e:
+                last_error = e
+                break
+
+            embeddings = data.get("embeddings", [])
+            if len(embeddings) != len(texts):
+                raise RuntimeError(
+                    f"Ollama returned {len(embeddings)} embeddings for "
+                    f"{len(texts)} texts"
+                )
+            return embeddings
+
+        raise RuntimeError(
+            f"Embedding failed after {self._max_retries + 1} attempts: "
+            f"{last_error}"
+        )
+
+
 def get_vector_collections() -> tuple[chromadb.Collection, chromadb.Client]:
-    ollama_ef = embedding_functions.OllamaEmbeddingFunction(
-        url=f"{OLLAMA_BASE_URL}/api/embeddings",
+    ollama_ef = BatchedOllamaEmbeddingFunction(
+        url=OLLAMA_BASE_URL,
         model_name=EMBEDDING_MODEL,
     )
+    # Warm the embedding model once so the first real upsert doesn't pay the
+    # model-load latency (which used to exceed httpx's 5s default and abort
+    # the run). Failure is non-fatal - the batched function retries anyway.
+    try:
+        ollama_ef(["warmup"])
+        print(f"[VectorDB] Embedding model {EMBEDDING_MODEL} warmed up")
+    except Exception as e:
+        print(f"[VectorDB] Embedding warm-up skipped: {e}")
+
     chroma_client = chromadb.PersistentClient(
         path=CHROMA_DIR_PATH,
         settings=Settings(anonymized_telemetry=False)
@@ -269,12 +368,18 @@ def add_to_vector_database(
 
         if documents:
             print(f"[VectorDB] Upserting {len(documents)} chunks for {result.url}")
-            collection.upsert(
-                documents=documents,
-                metadatas=metadatas,
-                ids=ids,
-            )
-            total_chunks += len(documents)
+            try:
+                collection.upsert(
+                    documents=documents,
+                    metadatas=metadatas,
+                    ids=ids,
+                )
+                total_chunks += len(documents)
+            except Exception as e:
+                # A slow/failed embedding (Ollama down, model cold start, etc.)
+                # must not abort the whole run - log and move on to the next
+                # URL. Other URLs still get stored.
+                print(f"[VectorDB] Upsert failed for {result.url}: {e}")
 
     # ── Display crawled results ───────────────────────────────────────────────
     st.subheader("Crawled Pages")

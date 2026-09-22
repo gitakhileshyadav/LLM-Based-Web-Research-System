@@ -338,7 +338,7 @@ Put this inside it:
     *.pyc
     web-search-llm-db
     docs
-    .git
+    .gitdfa
     *.log
 
 PART D — Build the image and push it to the registry

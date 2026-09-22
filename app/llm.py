@@ -1,6 +1,8 @@
 """LLM layer — all Ollama interactions: query expansion, iterative dimension
 generation, final report synthesis, direct answers, and health checks."""
 
+import re
+
 import requests
 import streamlit as st
 
@@ -112,7 +114,8 @@ This dimension: {sub_query}
 Instructions:
 - Write 2-3 detailed paragraphs specifically addressing this dimension
 - Use specific facts, dates, names, and figures from the context
-- Cite sources using [Source N] notation
+- Cite sources using [Source N] notation, where N is the source number shown in the context labels (e.g. "[Source 2 — url]")
+- ONLY cite [Source N] numbers that appear in the context — never invent a number that is not labelled there
 - Be analytical — do not just summarize, provide insight
 - This is ONE section of a larger report — stay focused on this dimension"""
 
@@ -145,9 +148,14 @@ def synthesize_final_report(
     original_prompt: str,
     dimension_answers: list[dict],
     query_type: str,
+    source_urls: list[str] | None = None,
 ) -> str:
     """
     Combine all dimension answers into a cohesive final research report.
+
+    `source_urls` is the global source registry (index N-1 = [Source N]).
+    Passing it lets the model verify citation numbers against the real list,
+    so every [Source N] in the final report maps to the Nth source URL.
     """
     sections = "\n\n".join([
         f"=== Dimension {i+1}: {d['sub_query']} ===\n{d['answer']}"
@@ -155,7 +163,20 @@ def synthesize_final_report(
         if d['answer']
     ])
 
-    system_prompt = """You are a senior research editor creating a final comprehensive report.
+    source_list_block = ""
+    citation_rules = "- Maintain all source citations"
+    if source_urls:
+        source_list_block = "\nSource list (the ONLY valid citation numbers):\n" + "\n".join(
+            f"[Source {i+1}] {url}" for i, url in enumerate(source_urls)
+        ) + "\n"
+        citation_rules = (
+            "- Maintain all source citations\n"
+            "- Use ONLY the [Source N] numbers from the source list above — "
+            "if a section cites a number that is not in the list, remove or "
+            "correct that citation; never invent new numbers"
+        )
+
+    system_prompt = f"""You are a senior research editor creating a final comprehensive report.
 Your task is to synthesize multiple research sections into one cohesive, well-structured report.
 
 Instructions:
@@ -165,11 +186,11 @@ Instructions:
 - Ensure logical flow between sections
 - Add a brief Executive Summary at the start
 - Add Key Takeaways at the end
-- Maintain all source citations
+{citation_rules}
 - The final report should be comprehensive and detailed"""
 
     full_prompt = f"""Original Research Question: {original_prompt}
-
+{source_list_block}
 Research sections to synthesize:
 {sections}
 
@@ -196,6 +217,41 @@ Write the final comprehensive research report:"""
             for d in dimension_answers
             if d['answer']
         ])
+
+
+# ── Citation Post-Processing ──────────────────────────────────────────────────
+
+# Matches every citation variant the LLM produces:
+#   [Source 1]  [Sources 1, 2]  [Source 1, 2]  [Source 1, Source 2]
+# The (?!\() lookahead skips citations that were ALREADY converted to
+# markdown links, so link_citations() is safe to run twice.
+_CITATION_RE = re.compile(
+    r"\[\s*Sources?\s+\d+(?:\s*,\s*(?:Sources?\s+)?\d+)*\s*\](?!\()"
+)
+
+
+def link_citations(text: str, source_urls: list[str]) -> str:
+    """
+    Turn [Source N] citations in LLM output into clickable markdown links
+    pointing at the Nth source URL, and strip hallucinated citations whose
+    number is outside the source registry (they point at nothing real).
+
+    With source_urls = ["a", "b", "c"]:
+      "...spiked in 2026 [Source 2]."  ->  "...spiked in 2026 [Source 2](b)."
+      "...unclear [Source 9]."         ->  "...unclear."      (number removed)
+    """
+    if not text or not source_urls:
+        return text
+
+    def _repl(match: re.Match) -> str:
+        numbers = [int(n) for n in re.findall(r"\d+", match.group(0))]
+        valid = [n for n in numbers if 1 <= n <= len(source_urls)]
+        if not valid:
+            return ""
+        links = [f"[Source {n}]({source_urls[n - 1]})" for n in valid]
+        return links[0] if len(links) == 1 else "[" + ", ".join(links) + "]"
+
+    return _CITATION_RE.sub(_repl, text)
 
 
 def check_ollama_running() -> bool:

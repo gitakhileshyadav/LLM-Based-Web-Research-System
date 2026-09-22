@@ -35,6 +35,7 @@ from app.llm import (
     _answer_directly,
     expand_query,
     generate_dimension_answer,
+    link_citations,
     synthesize_final_report,
 )
 from app.robots import check_robots_txt
@@ -164,6 +165,33 @@ async def run():
             _answer_directly(prompt, query_type)
             st.stop()
 
+        # ── Step 7b: Global source registry — stable citation numbers ────────
+        # One number per source URL, consistent across every dimension and
+        # the final report, so [Source N] in ANY sentence always maps to the
+        # Nth entry of the "All Sources" list. Built from the chunks actually
+        # stored for this session (falls back to the whole DB when the session
+        # stored nothing or when answering from an existing DB).
+        try:
+            if session_id:
+                stored = collection.get(
+                    where={"session_id": session_id}, include=["metadatas"]
+                )
+                stored_metas = stored.get("metadatas") or []
+                if not stored_metas:
+                    stored = collection.get(include=["metadatas"])
+                    stored_metas = stored.get("metadatas") or []
+            else:
+                stored = collection.get(include=["metadatas"])
+                stored_metas = stored.get("metadatas") or []
+            source_urls = sorted({
+                m.get("source", "") for m in stored_metas if m.get("source")
+            })
+        except Exception as e:
+            print(f"[Research] Could not build source registry: {e}")
+            source_urls = []
+        source_ids = {url: i + 1 for i, url in enumerate(source_urls)}
+        print(f"[Research] Source registry: {len(source_urls)} sources")
+
         # ── Step 8: Iterative generation — one answer per dimension ───────────
         st.divider()
         st.subheader("🔬 Deep Research Report")
@@ -209,12 +237,22 @@ async def run():
                 dim_docs, dim_metas = [], []
 
             # ── Build context for this dimension ──────────────────────────────
+            # Labels use the GLOBAL source number so [Source N] means the
+            # same URL in every dimension, in the synthesis, and in the
+            # All Sources list. A source missing from the registry (e.g. a
+            # dimension fell back to old-DB chunks) is appended with the next
+            # free number instead of breaking the numbering.
             if dim_docs:
                 context_parts = []
-                for j, (doc, meta) in enumerate(zip(dim_docs, dim_metas)):
+                for doc, meta in zip(dim_docs, dim_metas):
                     source  = meta.get("source", "Unknown")
-                    excerpt = doc[:800]
-                    context_parts.append(f"[Source {j+1} — {source}]\n{excerpt}")
+                    sid = source_ids.get(source)
+                    if sid is None:
+                        sid = len(source_urls) + 1
+                        source_urls.append(source)
+                        source_ids[source] = sid
+                        print(f"[Research] Late source #{sid}: {source}")
+                    context_parts.append(f"[Source {sid} — {source}]\n{doc[:800]}")
                 dim_context = "\n\n".join(context_parts)
 
                 if len(dim_context) > 6000:
@@ -243,7 +281,7 @@ async def run():
                 f"📖 Dimension {i+1}: {sub_query}",
                 expanded=(i == 0),     # expand first one by default
             ):
-                st.write(answer)
+                st.write(link_citations(answer, source_urls))
                 if dim_metas:
                     st.caption("Sources: " + ", ".join({
                         m.get("source", "") for m in dim_metas
@@ -259,6 +297,7 @@ async def run():
                 original_prompt=prompt,
                 dimension_answers=dimension_answers,
                 query_type=query_type,
+                source_urls=source_urls,
             )
 
         progress_bar.progress(1.0)
@@ -266,16 +305,15 @@ async def run():
 
         st.divider()
         st.subheader("📋 Final Research Report")
-        st.write(final_report)
+        st.write(link_citations(final_report, source_urls))
 
         # ── Step 10: All sources ───────────────────────────────────────────────
+        # Numbered in the SAME order as the [Source N] citations, so the Nth
+        # link here is exactly what [Source N] in the report points to.
         st.subheader("📚 All Sources")
-        all_sources = set()
-        for d in dimension_answers:
-            all_sources.update(d["sources"])
-        for source in sorted(all_sources):
-            if source:
-                st.markdown(f"- {source}")
+        for i, url in enumerate(source_urls):
+            if url:
+                st.markdown(f"{i+1}. [{url}]({url})")
 
 # ── Entry Point ───────────────────────────────────────────────────────────────
 

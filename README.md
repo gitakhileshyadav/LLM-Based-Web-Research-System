@@ -1,8 +1,8 @@
-# 🔍 LLM Deep Web Research Tool
+# 🧪 Deep Research
 
 ## Description
 
-A production-grade, RAG-powered deep research tool that performs real-time multi-dimensional web research using a fully local AI stack. It solves the problem of shallow, single-source answers by automatically expanding your query into multiple research dimensions, crawling reputed web sources, storing structured content in a vector database, and generating comprehensive research reports — all on your own machine with zero external API costs.
+A production-grade, RAG-powered deep research tool that performs real-time multi-dimensional web research using a fully local AI stack. Instead of expanding your query from model memory alone, it searches the live web **first** and refines your query against what actually exists right now — the classic pseudo-relevance feedback technique with an LLM doing the term selection, date-aware and grounded in current results. It then crawls reputed web sources, stores structured content in a local vector database, and generates comprehensive research reports inside an instrument-panel console UI where you control exactly which research component is visible — all on your own machine with zero external API costs.
 
 ---
 
@@ -238,21 +238,49 @@ Open http://localhost:8501 in your browser.
 
 ### Deep Research Mode (recommended)
 
-1. Type your research question in the text area
-2. Toggle **Enable Web Search** ON
-3. Click **GO**
-4. Watch the pipeline execute step by step — query expansion, async search, crawling, vector storage, iterative generation, and final report
+1. Type your research question (**Research Hypothesis**)
+2. Toggle **Web Spectrum Acquisition** ON
+3. Click **▶ RUN EXPERIMENT**
+4. Watch the protocol tracker run through its five phases — **INTAKE → EXPANSION → COLLECTION → ASSAYS → SYNTHESIS**:
+   - The original query is searched on SearXNG first (baseline spectrum scan)
+   - The top 10 live titles/snippets + today's date are given to the LLM, which refines 3-4 queries grounded in current results (pseudo-relevance feedback)
+   - All queries are searched in parallel, specimens crawled and indexed, each dimension answered separately, and everything synthesized into a final report
+
+### Manual Specimen Intake
+
+Have specific pages you already know about? Give them directly:
+
+1. Paste one or more URLs into **Manual Sample Intake** (one per line)
+2. With **Web Spectrum Acquisition** OFF, click **▶ RUN EXPERIMENT** — your URLs are crawled directly, no search, no expansion
+3. With it ON, your URLs are crawled **in addition to** the search results
+4. Live **Specimen Status** shows each URL as ✅ CULTIVATED, ❌ NON-VIABLE, ⚠️ DEGRADED (JS-only shell), ⛔ CONTAINMENT FAILURE (robots.txt), or ⚠️ REJECTED INPUT
+
+Manual URLs bypass curation limits entirely (explicit intent), but still pass robots.txt and SSRF safety checks.
+
+### Per-component telemetry
+
+The sidebar **Instrument Telemetry** panel gives you full control over what the pipeline reveals — each component can be toggled independently (all default OFF):
+
+| Toggle | Reveals |
+|---|---|
+| **Dimensions** | The refined research queries (assay conditions) |
+| **Specimens** | Every URL found across all dimensions |
+| **Crawl log** | Per-URL crawl results with extracted content |
+| **Vector DB** | Chunk metrics — this session, total, session ID |
+| **Top chunks** | The exact chunks the LLM reads first |
+
+Use **ALL** / **NONE** to flip the whole panel at once.
 
 ### Query from existing database
 
 1. Type your question
-2. Leave **Enable Web Search** OFF
-3. Click **GO**
+2. Leave **Web Spectrum Acquisition** OFF (no manual URLs needed)
+3. Click **▶ RUN EXPERIMENT**
 4. The LLM answers using previously stored ChromaDB data, or directly from model knowledge if the database is empty
 
 ### Reset the database
 
-Use the **Reset Database** button in the sidebar to clear all stored chunks before starting a new research topic.
+Use **⚠️ Purge Sample Storage** in the sidebar to clear all stored chunks before starting a new research topic.
 
 ### Example queries
 
@@ -271,17 +299,22 @@ What are the recent breakthroughs in large language model reasoning?
 
 ## Features
 
-- **Query expansion** — automatically generates 4 sub-queries covering different dimensions of your topic
+- **Pseudo-relevance feedback (PRF)** — your original query is searched on SearXNG first; the top 10 live titles/snippets plus today's date are fed to the LLM, which refines queries grounded in what actually exists on the web right now (exact entities, current names, recency qualifiers like "latest" / "2026") — not in the model's training-cutoff memory
+- **Memory-based fallback** — if SearXNG returns nothing (outage, suspended engines), expansion falls back to LLM sub-queries so you never lose dimension coverage
+- **Manual sample intake** — add your own URLs and watch their live Specimen Status; manual URLs bypass curation limits but still pass robots.txt + SSRF checks
+- **Full-control telemetry UI** — per-component visibility toggles (Dimensions, Specimens, Crawl log, Vector DB, Top chunks), each independent, default OFF, with ALL/NONE quick-flip
+- **AI-lab console** — light clinical theme with protocol tracker (INTAKE → EXPANSION → COLLECTION → ASSAYS → SYNTHESIS), assay conditions, per-assay readings, lab-notebook report card, and numbered citation chips
 - **Query-type detection** — classifies queries as science, news, or general and adjusts sources and prompts accordingly
-- **Async multi-search** — searches all 4 dimensions simultaneously with IP-safe delays between requests
-- **Dual crawl strategy** — lightweight mode for standard sites, full-browser JS rendering for BBC, Reuters, Guardian
+- **Async multi-search** — searches all dimensions in parallel with a bounded semaphore, engine-set rotation, and per-dimension retry
+- **Dual crawl strategy** — lightweight mode for standard sites, full-browser JS rendering for BBC, Reuters, Guardian — including **shadow-DOM flattening** for SPA sites (msn.com) and CSP-header neutralization so bot-walled pages render
 - **Source prioritization** — science queries hit arxiv and HuggingFace first; news queries hit Reuters and BBC first
+- **Pre-crawl curation** — drops root homepages, single-token mismatches, and domain dupes; caps at 12 URLs / 3 per domain (adaptive: goes lenient when the result pool is small)
 - **BM25 source ranking** — search results are ranked against the query; only the most relevant sources are forwarded to the crawler
 - **BM25 content filtering** — keeps only query-relevant sentences, discards all noise
-- **Ad and tracker removal** — 24+ CSS selectors strip ads, cookie banners, and popups before storage
+- **Ad and tracker removal** — boundary-aware CSS selectors strip ads, cookie banners, and popups before storage (without false-positive matches on "header"/"reader"-style class names)
 - **Structured vector storage** — every chunk tagged with session_id, chunk_index, source, crawled_at, and query
 - **Stale chunk deletion** — old data for the same URLs removed before each new crawl session
-- **Iterative RAG generation** — each dimension answered separately using its own retrieved context
+- **Iterative RAG generation** — each dimension answered separately using its own retrieved context, with globally stable [Source N] citation numbers
 - **Robots.txt compliance** — checks every URL before crawling in parallel using real Chrome user agent
 - **IP ban protection** — adaptive delays, consistent user agent, robots.txt respect, engine rotation
 - **Fully local** — Ollama, ChromaDB, and SearXNG all run locally with zero external API costs
@@ -294,13 +327,13 @@ What are the recent breakthroughs in large language model reasoning?
 llm-web-search/
 |
 +-- app/                    # Main application package
-|   +-- main.py             # Main application — Streamlit UI and pipeline orchestration
+|   +-- main.py             # Streamlit UI — AI-lab console, PRF pipeline, telemetry panels
 |   +-- config.py           # All constants — models, SearXNG instances, domains, keywords
-|   +-- search.py           # SearXNG search + IP-safe async multi-search
+|   +-- search.py           # SearXNG search, live-evidence gathering, async multi-search
 |   +-- robots.py           # robots.txt compliance checks
-|   +-- crawler.py          # Dual-mode crawling + query-type / source-priority logic
-|   +-- vectordb.py         # ChromaDB chunking, storage, cleanup + status display
-|   +-- llm.py              # Ollama calls — expansion, dimension answers, synthesis
+|   +-- crawler.py          # Dual-mode crawling + shadow-DOM flattening + curation
+|   +-- vectordb.py         # ChromaDB chunking, storage, stale-chunk cleanup
+|   +-- llm.py              # Ollama calls — PRF refinement, dimension answers, synthesis
 |   +-- __init__.py         # Package marker
 |
 +-- docker/                 # Container packaging
@@ -324,18 +357,22 @@ llm-web-search/
 
 | Function | Module | Purpose |
 |---|---|---|
-| expand_query() | llm.py | LLM generates 4 research sub-queries |
-| async_multi_search() | search.py | Async search all dimensions with IP-safe delays |
+| get_search_evidence() | search.py | BM25-ranked live results ({url, title, content}) — PRF building block |
+| refine_queries_from_results() | llm.py | Pseudo-relevance feedback — LLM refines queries from live evidence + today's date |
+| expand_query() | llm.py | Memory-based sub-queries (fallback when no live evidence) |
+| async_multi_search() | search.py | Async search all dimensions with engine-set rotation + retry |
 | check_robots_txt() | robots.py | Parallel robots.txt compliance for all URLs |
-| crawl_webpages() | crawler.py | Dual-mode crawling — standard and JS-heavy configs |
+| crawl_webpages() | crawler.py | Dual-mode crawling — standard and JS-heavy (shadow-DOM flattening) |
 | detect_query_type() | crawler.py | Classify query as science / news / general |
 | prioritize_urls() | crawler.py | Reorder URLs by source reputation |
+| curate_urls() | crawler.py | Pre-crawl filtering — homepages, dupes, caps (adaptive) |
 | clean_markdown_content() | vectordb.py | Strip ads, trackers, and HTML noise |
 | add_to_vector_database() | vectordb.py | Chunk, embed, and store with structured metadata |
 | clear_collection_for_urls() | vectordb.py | Delete stale chunks before new crawl |
 | generate_dimension_answer() | llm.py | RAG answer for one research dimension |
 | synthesize_final_report() | llm.py | Combine all dimensions into final report |
 | query_llm() | llm.py | Send prompt and context to Ollama |
+| link_citations() | llm.py | Map [Source N] markers to numbered references |
 | _answer_directly() | llm.py | Direct LLM answer when database is empty |
 
 ---
@@ -381,11 +418,8 @@ SEARXNG_INSTANCES = [
 
 # Domains to exclude from search results
 DISCARD_DOMAINS = [
-    "youtube.com", "britannica.com", "vimeo.com",
-    "spotify.com", "gaana.com",
-    "reddit.com", "quora.com",
-    "facebook.com", "instagram.com",
-    "twitter.com", "x.com",
+    "youtube.com", "reddit.com", "quora.com",
+    "facebook.com", "instagram.com", "twitter.com",
 ]
 
 # Content quality
@@ -394,6 +428,15 @@ SEARCH_CANDIDATE_POOL = 25    # raw results collected per query before BM25 re-r
 MAX_CHUNKS_PER_URL    = 20    # max chunks stored per source URL
 CHUNK_SIZE         = 500   # characters per chunk
 CHUNK_OVERLAP      = 80    # overlap between consecutive chunks
+
+# Curation limits
+MAX_CRAWL_URLS           = 12   # hard cap on URLs handed to the crawler
+MAX_URLS_PER_DOMAIN      = 3    # max pages per domain after dedup
+CURATION_LENIENT_MAX_URLS = 6   # pool size below which curation goes lenient
+
+# Pseudo-relevance feedback (fixed defaults in search.py / llm.py)
+#   evidence results per baseline scan : 10
+#   refined queries per run            : 4 (same fan-out as memory expansion)
 ```
 
 ---
@@ -425,7 +468,7 @@ Please test with at least 3 different query types — science, news, and general
 ### v1.1 — Quality
 - [ ] Streaming LLM output — show tokens as they generate instead of waiting
 - [ ] Source credibility scoring — rank sources by domain authority
-- [ ] Citation footnotes — auto-numbered references in the final report
+- [x] Citation footnotes — auto-numbered references in the final report
 - [ ] Answer confidence scoring — flag when context is insufficient
 
 ### v1.2 — Performance

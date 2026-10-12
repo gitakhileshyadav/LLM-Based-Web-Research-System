@@ -2,6 +2,7 @@
 generation, final report synthesis, direct answers, and health checks."""
 
 import re
+import time
 
 import requests
 import streamlit as st
@@ -90,6 +91,104 @@ Return ONLY the 4 queries, one per line, no numbering, no explanation.""",
     except Exception as e:
         print(f"[QueryExpansion] Error: {e} — using original query")
         return [prompt]
+
+
+# ── Pseudo-Relevance Feedback (PRF) query refinement ─────────────────────────
+
+def refine_queries_from_results(
+    prompt: str,
+    evidence: list[dict],
+    query_type: str = "general",
+) -> list[str]:
+    """
+    Pseudo-relevance feedback: generate refined search queries grounded in
+    the ACTUAL titles/snippets SearXNG returned for the original prompt,
+    instead of the model's (training-cutoff) memory.
+
+    The refinement prompt includes today's date so the LLM can add recency
+    qualifiers ("latest", "2026") to time-sensitive topics.
+
+    Returns up to 4 refined queries, or [] on any failure (the caller then
+    falls back to the memory-based expand_query).
+    """
+    if not evidence:
+        return []
+
+    # ── Format evidence — numbered titles + snippets ──────────────────────────
+    lines = []
+    for i, r in enumerate(evidence, start=1):
+        title = (r.get("title") or "").strip()
+        snippet = (r.get("content") or "").strip()
+        snippet = snippet[:280]              # keep the prompt compact
+        lines.append(f"{i}. TITLE: {title} | SNIPPET: {snippet}")
+    evidence_block = "\n".join(lines)
+
+    today = time.strftime("%Y-%m-%d")
+
+    system_prompt = (
+        "You generate precise search queries grounded in search evidence. "
+        "Return only the queries, nothing else."
+    )
+
+    refinement_prompt = f"""You are a search-query specialist. Today's date is {today}.
+
+The user's original query is:
+"{prompt}"
+
+Below are the TOP LIVE RESULTS returned by a search engine for that exact
+query right now:
+
+{evidence_block}
+
+Based ONLY on the terms, entities, product names, people, version numbers and
+phrasing you can actually SEE in these live results (not your memory), write
+3-4 refined search queries that will dig deeper into this exact topic:
+
+- Reuse the exact names, spellings and wording the live results use.
+- If the results indicate a time-sensitive topic, include a recency qualifier
+  with the current date or year (e.g. "latest", "{today[:4]}").
+- Each query must be specific enough to retrieve DIFFERENT pages than the
+  ones already shown.
+
+Return ONLY the queries, one per line, no numbering, no explanation."""
+
+    try:
+        response = requests.post(
+            f"{OLLAMA_BASE_URL}/api/generate",
+            json={
+                "model":  OLLAMA_MODEL,
+                "prompt": refinement_prompt,
+                "system": system_prompt,
+                "stream": False,
+            },
+            timeout=60,
+        )
+        response.raise_for_status()
+        raw = response.json().get("response", "")
+
+        # ── Parse refined queries — one per line, deduped, original dropped ──
+        seen = set()
+        refined = []
+        for line in raw.strip().splitlines():
+            q = line.strip().strip('"').strip()
+            if not q or len(q) <= 10:
+                continue
+            if q.lower() == prompt.strip().lower() or q.lower() in seen:
+                continue
+            seen.add(q.lower())
+            refined.append(q)
+            if len(refined) >= 4:        # same fan-out cap as expand_query
+                break
+
+        print(f"[PRF] Refined {len(refined)} queries from {len(evidence)} live results:")
+        for i, q in enumerate(refined):
+            print(f"  {i+1}. {q}")
+
+        return refined
+
+    except Exception as e:
+        print(f"[PRF] Refinement error: {e} — caller will fall back to memory expansion")
+        return []
 
 
 # ── Iterative Generation ──────────────────────────────────────────────────────

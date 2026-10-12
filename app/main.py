@@ -39,10 +39,11 @@ from app.llm import (
     expand_query,
     generate_dimension_answer,
     link_citations,
+    refine_queries_from_results,
     synthesize_final_report,
 )
 from app.robots import check_robots_txt
-from app.search import async_multi_search, is_safe_url
+from app.search import async_multi_search, get_search_evidence, is_safe_url
 from app.vectordb import add_to_vector_database, get_vector_collections, reset_collection
 
 
@@ -587,9 +588,20 @@ async def run():
         # ── Web search path ───────────────────────────────────────────────────
         if is_web_search and prompt:
 
-            # ── Step 1: Expand query into sub-queries ─────────────────────────
-            with st.spinner("🧫 Cultivating research dimensions..."):
-                sub_queries = expand_query(prompt, query_type)
+            # ── Step 1: Pseudo-relevance feedback — search the ORIGINAL query
+            # on SearXNG FIRST, then let the LLM refine queries grounded in the
+            # live titles/snippets (current-date aware), not in model memory.
+            # Falls back to memory-based expand_query when no evidence exists.
+            with st.spinner("🔎 Running baseline spectrum scan..."):
+                evidence = get_search_evidence(prompt, numresults=10)
+
+                sub_queries = []
+                evidence_source = "model-memory expansion (no live results)"
+                if evidence:
+                    evidence_source = f"refined from {len(evidence)} live result(s)"
+                    sub_queries = refine_queries_from_results(prompt, evidence, query_type)
+                if not sub_queries:
+                    sub_queries = expand_query(prompt, query_type)
 
             # Always search the ORIGINAL topic verbatim first - the exact title
             # is what returns the truly relevant links (e.g. searching "Student
@@ -606,6 +618,7 @@ async def run():
 
             if show_dimensions:
                 st.subheader("🧬 Assay Conditions")
+                st.caption(f"🔎 {evidence_source}")
                 for i, q in enumerate(search_queries):
                     label = "Original topic" if i == 0 else f"Assay {i:02d}"
                     st.write(f"**{label}:** {q}")

@@ -210,19 +210,20 @@ ENGINE_SETS = [
 _CLIENT_TIMEOUT = 12.0
 
 
-def _query_one_engine_set(
+def _evidence_one_engine_set(
     search_term: str,
     clean_term: str,
     numresults: int,
     engine_set: list[str] | None,
     instance_url: str,
-) -> list[str]:
+) -> list[dict]:
     """
     Hit SearXNG once with a specific `engines=` parameter.
     When `engine_set` is None, omit the `engines` param entirely so SearXNG
     uses its default engine pool (generic fallback when the pinned sets all
     failed).
-    Returns a list of ranked URLs, or [] if this set produced nothing usable.
+    Returns BM25-ranked evidence dicts ({url, title, content}), or [] if this
+    set produced nothing usable.
     Does NOT retry on network errors - the caller rotates to the next set.
     """
     params = {
@@ -301,16 +302,21 @@ def _query_one_engine_set(
     # BM25-rank sources against the clean (dimension) query so
     # only the most relevant links are forwarded to the crawler.
     ranked = _rank_sources(clean_term, safe_urls, top_n=numresults)
-    return [r["url"] for r in ranked]
+    return ranked
 
 
-def get_web_urls(
+def get_search_evidence(
     search_term: str,
-    numresults: int = 5,
+    numresults: int = 10,
     engine_set: list[str] | None = None,
-) -> list[str]:
+) -> list[dict]:
     """
-    Query SearXNG and return ranked URLs for one dimension.
+    Query SearXNG and return BM25-ranked evidence dicts ({url, title,
+    content}) for one query.
+
+    This is the pseudo-relevance-feedback building block: the top results'
+    titles and snippets are handed to the LLM so refined queries are grounded
+    in what actually exists on the web right now, not in model memory.
 
     `engine_set`, if provided, queries ONLY that set (used by the parallel
     multi-search so each sub-query fans out to a different mix). If None, we
@@ -330,7 +336,7 @@ def get_web_urls(
 
     # NOTE: we deliberately do NOT append "-site domain" exclusions to the
     # query text. DISCARD_DOMAINS are already enforced post-hoc in
-    # _query_one_engine_set() (any URL whose host matches is skipped), so
+    # _evidence_one_engine_set() (any URL whose host matches is skipped), so
     # appending them here only bloated the query and made Bing misparse
     # multi-word phrases - it started returning generic single-word matches
     # instead of the actual topic. The clean full sentence is sent as-is so
@@ -356,18 +362,18 @@ def get_web_urls(
         for instance_url in SEARXNG_INSTANCES:
             for eset in sets_to_try:
                 print(f"[SearXNG] {instance_url} engines={eset} (attempt {attempt+1})")
-                urls = _query_one_engine_set(
+                evidence = _evidence_one_engine_set(
                     search_term=search_term_with_excludes,
                     clean_term=clean_term,
                     numresults=numresults,
                     engine_set=eset,
                     instance_url=instance_url,
                 )
-                if urls:
+                if evidence:
                     # Small backoff before yielding so concurrent callers don't
                     # all hammer the next dimension at the exact same instant.
                     time.sleep(random.uniform(0.3, 0.8))
-                    return urls
+                    return evidence
 
         if attempt == 0:
             # Short backoff, then try again. Engine suspensions (DDG 300s,
@@ -379,19 +385,39 @@ def get_web_urls(
         else:
             # Final generic fallback: let SearXNG pick any non-suspended engine.
             print("[SearXNG] Generic fallback (no engine restriction)...")
-            generic_urls = _query_one_engine_set(
+            generic = _evidence_one_engine_set(
                 search_term=search_term_with_excludes,
                 clean_term=clean_term,
                 numresults=numresults,
                 engine_set=None,   # no engines= param -> SearXNG default pool
                 instance_url=SEARXNG_INSTANCES[0],
             )
-            if generic_urls:
+            if generic:
                 time.sleep(random.uniform(0.3, 0.8))
-                return generic_urls
+                return generic
 
     print("[SearXNG] All instances/exhausted.")
     return []
+
+
+def get_web_urls(
+    search_term: str,
+    numresults: int = 5,
+    engine_set: list[str] | None = None,
+) -> list[str]:
+    """
+    Query SearXNG and return ranked URLs for one dimension.
+    Thin wrapper over get_search_evidence() - identical behaviour to the
+    pre-PRF implementation.
+    """
+    return [
+        r["url"] for r in get_search_evidence(
+            search_term=search_term,
+            numresults=numresults,
+            engine_set=engine_set,
+        )
+        if r.get("url")
+    ]
 
 
 # ---------------------------------------------------------------------------

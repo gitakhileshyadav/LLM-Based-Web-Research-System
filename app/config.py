@@ -102,6 +102,7 @@ JS_HEAVY_DOMAINS = [
     "wired.com", "theatlantic.com", "politico.com",
     "indianexpress.com", "ndtv.com", "hindustantimes.com",
     "businessinsider.com", "cnbc.com", "cnn.com","unacademy.com","byju's.com", "vedantu.com",
+    "msn.com",          # JS-only SPA shell without full rendering - 1-char markdown
 ]
 
 # Reputed scientific / research sources — highest priority for science queries

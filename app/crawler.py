@@ -43,6 +43,93 @@ from app.search import tokenize
 # chars is roughly one paragraph - the minimum useful unit for RAG context.
 _FALLBACK_MIN_CHARS = 200
 
+# Pure content-ready CHECK used as wait_for (no DOM mutation). SPAs like
+# msn.com render their article inside OPEN shadow roots invisible to
+# page.content(); the light DOM alone holds ~60-80 chars there. This polls
+# for real text across BOTH the light DOM and all open shadow roots.
+# csp_compliant_wait polls it every 100ms; returns False on timeout, so a
+# hard bot-wall just falls through to the retry/fallback chain.
+# The actual FLATTENING happens later, in the before_retrieve_html hook
+# (_flatten_shadow_dom_hook) - the last possible moment before capture.
+_CONTENT_READY_JS = (
+    "js:() => {"
+    " let textLen = document.body ? (document.body.innerText || '').length : 0;"
+    " document.querySelectorAll('*').forEach(el => {"
+    "   if (el.shadowRoot && el.shadowRoot.textContent)"
+    "     textLen += el.shadowRoot.textContent.length;"
+    " });"
+    " return textLen > 500;"
+    "}"
+)
+
+# Shadow-DOM flattening snippet, run via the before_retrieve_html hook right
+# before page.content() capture. SPAs like msn.com render their entire article
+# inside OPEN shadow roots - the light DOM holds ~60 chars while
+# page.content() (which does NOT pierce shadow roots) sees an empty shell.
+# This snippet walks every open shadow root depth-first and copies each
+# root's innerHTML into a marked div appended to its host, so nested shadows
+# flatten before their parents are serialized. crawl4ai 0.4.248 has no
+# built-in flatten_shadow_dom (that landed in 0.9.x) - this replicates it.
+# Runs at the LAST possible moment so an SPA's React re-render has no time
+# to wipe the flattened content between flatten and capture.
+#
+# MUST be plain statements, NOT a bare "() => {...}" function expression:
+# crawl4ai 0.4.248 wraps every js_code snippet as
+#   (async () => { try { {script} return {success:true}; } ... })()
+# so a function expression would only be evaluated, never invoked.
+_SHADOW_FLATTEN_JS = """
+const flattenShadowRoots = (root) => {
+    for (const el of Array.from(root.querySelectorAll('*'))) {
+        if (el.shadowRoot) {
+            flattenShadowRoots(el.shadowRoot);
+            const div = document.createElement('div');
+            div.setAttribute('data-shadow-flattened', '1');
+            div.innerHTML = el.shadowRoot.innerHTML;
+            el.appendChild(div);
+        }
+    }
+};
+flattenShadowRoots(document);
+"""
+
+
+async def _flatten_shadow_dom_hook(page, context=None, config=None, **kwargs):
+    """
+    before_retrieve_html hook: flattens open shadow roots into the light DOM
+    immediately before page.content() capture. Runs AFTER the wait condition
+    (content is confirmed rendered) and after overlay/iframe handling - the
+    last possible moment, so a re-rendering SPA has no time to wipe the
+    flattened content before the HTML is captured.
+    """
+    try:
+        await page.evaluate(_SHADOW_FLATTEN_JS)
+    except Exception as e:
+        print(f"[Crawl] Shadow flatten failed: {e}")
+
+
+# ── Surgical patch: crawl4ai 0.4.248 unconditionally sets a
+# Content-Security-Policy REQUEST header on every page (async_crawler_strategy.
+# py _crawl_web, line ~1345). Real browsers never send CSP on requests - MSN's
+# edge treats it as a bot signal and serves an empty JS shell. Verified: an
+# identical Playwright context WITH the header polls textLen=0 forever;
+# WITHOUT it the full article renders in ~3s. crawl4ai's ONLY
+# set_extra_http_headers call is this CSP header, so filtering the key out
+# makes it a no-op. Harmless for static sites (they worked with it anyway).
+from playwright.async_api import Page
+
+_orig_set_extra_http_headers = Page.set_extra_http_headers
+
+
+async def _set_extra_http_headers_no_csp(self, headers):
+    filtered = {
+        k: v for k, v in (headers or {}).items()
+        if k.lower() != "content-security-policy"
+    }
+    return await _orig_set_extra_http_headers(self, filtered)
+
+
+Page.set_extra_http_headers = _set_extra_http_headers_no_csp
+
 
 def detect_query_type(prompt: str) -> str:
     """
@@ -186,24 +273,28 @@ async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
     urls          = prioritize_urls(urls, query_type)
 
     # ── Step 2: BM25 filter ───────────────────────────────────────────────────
-    bm25_filter = BM25ContentFilter(
-        user_query=prompt,
-        bm25_threshold=BM25_THRESHOLD,
-        language="english",
-    )
-
-    # ── Step 3: Markdown generator ────────────────────────────────────────────
-    md_generator = DefaultMarkdownGenerator(
-        content_filter=bm25_filter,
-        options={
-            "ignore_links":        True,
-            "ignore_images":       True,
-            "body_width":          0,
-            "skip_internal_links": True,
-            "include_sup_sub":     False,
-            "mark_code":           True,    # preserve code blocks for science
-        }
-    )
+    # An empty prompt (custom-URLs-only mode) would score everything zero and
+    # drop all content — skip the filter in that case.
+    md_options = {
+        "ignore_links":        True,
+        "ignore_images":       True,
+        "body_width":          0,
+        "skip_internal_links": True,
+        "include_sup_sub":     False,
+        "mark_code":           True,    # preserve code blocks for science
+    }
+    if prompt and prompt.strip():
+        bm25_filter = BM25ContentFilter(
+            user_query=prompt,
+            bm25_threshold=BM25_THRESHOLD,
+            language="english",
+        )
+        md_generator = DefaultMarkdownGenerator(
+            content_filter=bm25_filter,
+            options=md_options,
+        )
+    else:
+        md_generator = DefaultMarkdownGenerator(options=md_options)
 
     # ── Shared excluded tags and selectors ────────────────────────────────────
     EXCLUDED_TAGS = [
@@ -213,9 +304,17 @@ async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
         "button", "input", "select",
     ]
 
+    # ⚠️ The ad selectors are BOUNDARY-AWARE on purpose: a bare "[class*='ad']"
+    # matches any class CONTAINING "ad" - which kills real content containers
+    # whose names happen to include it: "header", "headline", "lead", "reader"
+    # (article-reader-container!), "badge", "loaded", "advanced". Verified on
+    # msn.com: "[class*='ad']" alone removed 113K chars INCLUDING the entire
+    # article. Dash/token-bounded variants only match genuine ad containers.
     EXCLUDED_SELECTORS = ",".join([
-        "[class*='ad']",           "[class*='ads']",
-        "[class*='advert']",       "[id*='ad']",
+        "[class~='ad']",           "[class$='-ad']",
+        "[class*='-ad-']",         "[class*='ad-']",
+        "[class*='advert']",       "[id~='ad']",
+        "[id$='-ad']",             "[id*='-ad-']",
         "[class*='banner']",       "[class*='popup']",
         "[class*='modal']",        "[class*='overlay']",
         "[class*='cookie']",       "[class*='consent']",
@@ -254,16 +353,35 @@ async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
         excluded_selector=EXCLUDED_SELECTORS,
         only_text=False,               # ✅ must be False - JS needs full render
         keep_data_attributes=False,
-        remove_overlay_elements=True,
+        # ❌ remove_overlay_elements deliberately OFF: its bundled JS removes
+        # every block element with empty innerText - which kills shadow-DOM
+        # flattened content (unslotted light children have empty innerText even
+        # when full of text). Popup/cookie/ad classes are already stripped by
+        # EXCLUDED_SELECTORS in the markdown generator, so this step is
+        # redundant - and destructive for SPAs like msn.com.
+        remove_overlay_elements=False,
         cache_mode=CacheMode.ENABLED,  # was BYPASS
         word_count_threshold=30,      # lower threshold - news articles are shorter
 
         # ✅ Key JS-site settings
         page_timeout=45000,            # 45s for heavy JS frameworks
-        delay_before_return_html=5.0,  # 5s for JS to fully render
-        wait_for="css:article,main,p", # wait for content elements in DOM
+        # 0.0 (was 5.0) - the wait condition already polls until real content
+        # exists, and the shadow flatten runs in the before_retrieve_html hook
+        # AFTER this delay, immediately before page.content(). Any delay here
+        # only widens the window in which an SPA's React re-render can wipe
+        # the flattened content before capture.
+        delay_before_return_html=0.0,
+        wait_for=_CONTENT_READY_JS,    # flatten shadow roots + wait for text
+        # ❌ process_iframes deliberately OFF: cross-origin iframes can hang
+        # 30s each in wait_for_load_state, and MSN's article lives in shadow
+        # DOM, not iframes.
 
-        # ✅ Scroll simulation - triggers lazy-loaded content
+        # ✅ Scroll simulation BEFORE wait_for (0.4.248 runs js_code first) -
+        # triggers lazy-loaded content. Shadow flattening lives INSIDE the
+        # wait condition (_CONTENT_READY_JS) because js_code here fires too
+        # early: SPAs haven't rendered their shadow content yet at ~1s.
+        # NOTE: deliberately NO wait_until="networkidle" - SPAs keep polling
+        # connections open and never go idle (times out at 45s on msn.com).
         js_code=[
             "window.scrollTo(0, document.body.scrollHeight / 2);",
             "await new Promise(r => setTimeout(r, 1500));",
@@ -329,6 +447,11 @@ async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
         # query-relevance step this app depends on, so we stay on serial
         # `arun`, which applies the filter correctly.
         async with AsyncWebCrawler(config=standard_browser) as crawler:
+            # Flatten shadow roots right before capture (no-op for static
+            # sites without shadow roots).
+            crawler.crawler_strategy.set_hook(
+                "before_retrieve_html", _flatten_shadow_dom_hook
+            )
             for url in all_standard:
                 try:
                     result = await crawler.arun(url, config=standard_config)
@@ -347,6 +470,11 @@ async def crawl_webpages(urls: list[str], prompt: str) -> list[CrawlResult]:
     if js_urls:
         print(f"[Crawl] JS-heavy sites: {js_urls}")
         async with AsyncWebCrawler(config=js_browser) as crawler:
+            # Flatten shadow roots right before capture - the last possible
+            # moment, so an SPA's React re-render can't wipe the content.
+            crawler.crawler_strategy.set_hook(
+                "before_retrieve_html", _flatten_shadow_dom_hook
+            )
             for url in js_urls:
                 try:
                     result = await crawler.arun(url, config=js_config)

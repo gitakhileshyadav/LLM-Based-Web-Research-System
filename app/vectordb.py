@@ -1,5 +1,6 @@
 """Vector database layer — ChromaDB persistent storage with chunking,
-structured metadata, stale-chunk cleanup, and Streamlit status display."""
+structured metadata, and stale-chunk cleanup. Storage only — all display
+rendering lives in main.py."""
 
 import os
 
@@ -13,7 +14,6 @@ import re
 import tempfile
 import time
 
-import streamlit as st
 import chromadb
 from chromadb.config import Settings
 from chromadb.api.types import Embeddings
@@ -263,6 +263,8 @@ def add_to_vector_database(
       - total_chunks  : total chunks from this source
       - query         : the search prompt that triggered this crawl
       - crawled_at    : ISO timestamp of when page was crawled
+
+    Storage only — all display/telemetry rendering lives in main.py.
     """
 
     # ── Session ID — shared across all chunks in this run ────────────────────
@@ -380,47 +382,5 @@ def add_to_vector_database(
                 # must not abort the whole run - log and move on to the next
                 # URL. Other URLs still get stored.
                 print(f"[VectorDB] Upsert failed for {result.url}: {e}")
-
-    # ── Display crawled results ───────────────────────────────────────────────
-    st.subheader("Crawled Pages")
-    for r in results:
-        with st.expander(f"{'✅' if r.success else '❌'} {r.url}"):
-            st.write(f"**Content length:** {len(r.markdown) if r.markdown else 0} chars")
-            if r.markdown:
-                st.text(r.markdown[:500])
-
-    # ── Display vector DB status ──────────────────────────────────────────────
-    st.subheader("Vector Database")
-    col1, col2, col3 = st.columns(3)
-    col1.metric("Chunks This Session", total_chunks)
-    col2.metric("Total Chunks in DB",  collection.count())
-    col3.metric("Session ID",          session_id)
-
-    # ── Display top 5 relevant chunks ─────────────────────────────────────────
-    if total_chunks > 0 and collection.count() > 0:
-        st.subheader("Top 5 Relevant Chunks")
-        try:
-            query_results = collection.query(
-                query_texts=[prompt],
-                n_results=min(5, collection.count()),
-            )
-            for i, (doc, meta) in enumerate(
-                zip(query_results["documents"][0], query_results["metadatas"][0])
-            ):
-                chunk_index       = meta.get("chunk_index", "?")
-                total_chunks_meta = meta.get("total_chunks", "?")
-                source            = meta.get("source", "Unknown")
-                session           = meta.get("session_id", "Unknown")
-                crawled           = meta.get("crawled_at", "Unknown")
-
-                with st.expander(
-                    f"Chunk {i+1} | Index {chunk_index}/{total_chunks_meta} | {source}"
-                ):
-                    st.caption(f"Session: {session} | Crawled: {crawled}")
-                    st.write(doc)
-
-        except Exception as e:
-            st.error(f"Failed to query vector DB: {e}")
-            print(f"[VectorDB] Query error: {e}")
 
     return session_id
